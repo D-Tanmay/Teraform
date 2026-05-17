@@ -26,195 +26,142 @@ jobs:
     runs-on: ubuntu-latest
 
     # Optional:
-    # Create GitHub environments named:
-    # plan
-    # apply
-    # destroy
+    # Create GitHub environments named: plan, apply, destroy
     # and configure manual approvals there
     environment: ${{ github.event.inputs.action }}
 
     env:
-      ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-      ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      ARM_CLIENT_ID:       ${{ secrets.AZURE_CLIENT_ID }}
+      ARM_CLIENT_SECRET:   ${{ secrets.AZURE_CLIENT_SECRET }}
+      ARM_TENANT_ID:       ${{ secrets.AZURE_TENANT_ID }}
       ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    defaults:
+      run:
+        working-directory: Terraform
 
     steps:
 
-    #################################################################
-    # CHECKOUT
-    #################################################################
+      # ── Checkout ─────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Checkout Repository
-      uses: actions/checkout@v4
+      # ── Azure CLI ────────────────────────────────────────────────────────
+      - name: Install Azure CLI
+        working-directory: ${{ github.workspace }}
+        run: curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
 
-    #################################################################
-    # INSTALL AZURE CLI
-    #################################################################
+      # ── Terraform ────────────────────────────────────────────────────────
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: "1.9.7"
 
-    - name: Install Azure CLI
-      run: |
-        curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+      # ── Validate secrets ─────────────────────────────────────────────────
+      - name: Validate Azure secrets
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: |
+          missing=()
+          [[ -z "$ARM_CLIENT_ID"       ]] && missing+=("ARM_CLIENT_ID")
+          [[ -z "$ARM_CLIENT_SECRET"   ]] && missing+=("ARM_CLIENT_SECRET")
+          [[ -z "$ARM_TENANT_ID"       ]] && missing+=("ARM_TENANT_ID")
+          [[ -z "$ARM_SUBSCRIPTION_ID" ]] && missing+=("ARM_SUBSCRIPTION_ID")
+          if [[ ${#missing[@]} -gt 0 ]]; then
+            echo "Missing secrets: ${missing[*]}"
+            exit 1
+          fi
 
-    #################################################################
-    # SETUP TERRAFORM
-    #################################################################
+      # ── Azure login ───────────────────────────────────────────────────────
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: |
+            {
+              "clientId":       "${{ secrets.AZURE_CLIENT_ID }}",
+              "clientSecret":   "${{ secrets.AZURE_CLIENT_SECRET }}",
+              "subscriptionId": "${{ secrets.AZURE_SUBSCRIPTION_ID }}",
+              "tenantId":       "${{ secrets.AZURE_TENANT_ID }}"
+            }
 
-    - name: Setup Terraform
-      uses: hashicorp/setup-terraform@v2
-      with:
-        terraform_version: '1.9.7'
+      # ── Bootstrap backend ─────────────────────────────────────────────────
+      - name: Bootstrap Terraform backend
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        env:
+          RESOURCE_GROUP:   tfstate-day04
+          STORAGE_ACCOUNT:  day0417691
+          CONTAINER:        tfstate
+          LOCATION:         westeurope
+        run: |
+          echo "Creating resource group..."
+          az group create \
+            --name "$RESOURCE_GROUP" \
+            --location "$LOCATION"
 
-    #################################################################
-    # VALIDATE SECRETS
-    #################################################################
+          echo "Creating storage account..."
+          az storage account create \
+            --resource-group "$RESOURCE_GROUP" \
+            --name "$STORAGE_ACCOUNT" \
+            --sku Standard_LRS \
+            --kind StorageV2 \
+            --location "$LOCATION"
 
-    - name: Validate Azure Secrets
-      shell: bash
-      run: |
-        if [ -z "$ARM_CLIENT_ID" ]; then
-          echo "Missing ARM_CLIENT_ID"
-          exit 1
-        fi
+          echo "Fetching storage account key..."
+          ACCOUNT_KEY=$(az storage account keys list \
+            --resource-group "$RESOURCE_GROUP" \
+            --account-name "$STORAGE_ACCOUNT" \
+            --query '[0].value' \
+            --output tsv)
 
-        if [ -z "$ARM_CLIENT_SECRET" ]; then
-          echo "Missing ARM_CLIENT_SECRET"
-          exit 1
-        fi
+          echo "Creating blob container..."
+          az storage container create \
+            --name "$CONTAINER" \
+            --account-name "$STORAGE_ACCOUNT" \
+            --account-key "$ACCOUNT_KEY"
 
-        if [ -z "$ARM_TENANT_ID" ]; then
-          echo "Missing ARM_TENANT_ID"
-          exit 1
-        fi
+      # ── Terraform init ────────────────────────────────────────────────────
+      - name: Terraform init
+        run: |
+          terraform init -reconfigure \
+            -backend-config="resource_group_name=tfstate-day04" \
+            -backend-config="storage_account_name=day0417691" \
+            -backend-config="container_name=tfstate" \
+            -backend-config="key=terraform.tfstate"
 
-        if [ -z "$ARM_SUBSCRIPTION_ID" ]; then
-          echo "Missing ARM_SUBSCRIPTION_ID"
-          exit 1
-        fi
+      # ── Terraform format check ────────────────────────────────────────────
+      - name: Terraform format check
+        run: terraform fmt -check -recursive
 
-    #################################################################
-    # AZURE LOGIN
-    #################################################################
+      # ── Terraform validate ────────────────────────────────────────────────
+      - name: Terraform validate
+        run: terraform validate
 
-    - name: Azure Login
-      uses: azure/login@v2
-      with:
-        creds: |
-          {
-            "clientId": "${{ secrets.AZURE_CLIENT_ID }}",
-            "clientSecret": "${{ secrets.AZURE_CLIENT_SECRET }}",
-            "subscriptionId": "${{ secrets.AZURE_SUBSCRIPTION_ID }}",
-            "tenantId": "${{ secrets.AZURE_TENANT_ID }}"
-          }
+      # ── Plan ──────────────────────────────────────────────────────────────
+      - name: Terraform plan
+        if: github.event.inputs.action == 'plan'
+        run: terraform plan -out=plan.tfplan
 
-    #################################################################
-    # BOOTSTRAP TERRAFORM BACKEND
-    #################################################################
+      - name: Upload plan artifact
+        if: github.event.inputs.action == 'plan'
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan
+          path: Terraform/plan.tfplan
 
-    - name: Bootstrap Terraform Backend
-      shell: bash
-      run: |
+      # ── Apply ─────────────────────────────────────────────────────────────
+      - name: Download plan artifact
+        if: github.event.inputs.action == 'apply'
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan
+          path: Terraform
 
-        RESOURCE_GROUP="tfstate-day04"
-        STORAGE_ACCOUNT="day0417691"
-        CONTAINER="tfstate"
-        LOCATION="westeurope"
+      - name: Terraform apply
+        if: github.event.inputs.action == 'apply'
+        run: terraform apply -auto-approve plan.tfplan
 
-        echo "Creating resource group..."
-        az group create \
-          --name $RESOURCE_GROUP \
-          --location $LOCATION
-
-        echo "Creating storage account..."
-        az storage account create \
-          --resource-group $RESOURCE_GROUP \
-          --name $STORAGE_ACCOUNT \
-          --sku Standard_LRS \
-          --kind StorageV2 \
-          --location $LOCATION
-
-        echo "Getting storage account key..."
-        ACCOUNT_KEY=$(az storage account keys list \
-          --resource-group $RESOURCE_GROUP \
-          --account-name $STORAGE_ACCOUNT \
-          --query '[0].value' \
-          -o tsv)
-
-        echo "Creating blob container..."
-        az storage container create \
-          --name $CONTAINER \
-          --account-name $STORAGE_ACCOUNT \
-          --account-key $ACCOUNT_KEY
-
-    #################################################################
-    # TERRAFORM INIT
-    #################################################################
-
-    - name: Terraform Init
-      working-directory: Terraform
-      run: |
-        terraform init -reconfigure \
-          -backend-config="resource_group_name=tfstate-day04" \
-          -backend-config="storage_account_name=day0417691" \
-          -backend-config="container_name=tfstate" \
-          -backend-config="key=terraform.tfstate"
-
-    #################################################################
-    # TERRAFORM FORMAT CHECK
-    #################################################################
-
-    - name: Terraform Format Check
-      working-directory: Terraform
-      run: terraform fmt -check -recursive
-
-    #################################################################
-    # TERRAFORM VALIDATE
-    #################################################################
-
-    - name: Terraform Validate
-      working-directory: Terraform
-      run: terraform validate
-
-    #################################################################
-    # TERRAFORM PLAN
-    #################################################################
-
-    - name: Terraform Plan
-      if: github.event.inputs.action == 'plan'
-      working-directory: Terraform
-      run: |
-        terraform plan -out=plan.tfplan
-
-    - name: Upload Plan Artifact
-      if: github.event.inputs.action == 'plan'
-      uses: actions/upload-artifact@v4
-      with:
-        name: terraform-plan
-        path: Terraform/plan.tfplan
-
-    #################################################################
-    # TERRAFORM APPLY
-    #################################################################
-
-    - name: Download Plan Artifact
-      if: github.event.inputs.action == 'apply'
-      uses: actions/download-artifact@v4
-      with:
-        name: terraform-plan
-        path: Terraform
-
-    - name: Terraform Apply
-      if: github.event.inputs.action == 'apply'
-      working-directory: Terraform
-      run: |
-        terraform apply -auto-approve plan.tfplan
-
-    #################################################################
-    # TERRAFORM DESTROY
-    #################################################################
-
-    - name: Terraform Destroy
-      if: github.event.inputs.action == 'destroy'
-      working-directory: Terraform
-      run: |
-        terraform destroy -auto-approve
+      # ── Destroy ───────────────────────────────────────────────────────────
+      - name: Terraform destroy
+        if: github.event.inputs.action == 'destroy'
+        run: terraform destroy -auto-approve
