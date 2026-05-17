@@ -62,17 +62,12 @@ jobs:
       run: |
         echo "=== Active account ==="
         az account show
-
         echo ""
         echo "=== All accessible subscriptions ==="
         az account list --output table
-
         echo ""
-        echo "=== Subscription ID length check ==="
-        echo "Length: ${#ARM_SUBSCRIPTION_ID}"
-        # Print first/last 4 chars to detect formatting issues without exposing the full value
-        echo "Starts with: ${ARM_SUBSCRIPTION_ID:0:4}"
-        echo "Ends with:   ${ARM_SUBSCRIPTION_ID: -4}"
+        echo "=== SP role assignments ==="
+        az role assignment list --assignee "$ARM_CLIENT_ID" --output table
 
     - name: Bootstrap Terraform backend
       shell: bash
@@ -82,38 +77,34 @@ jobs:
         CONTAINER="tfstate"
         LOCATION="westeurope"
 
-        # Use the subscription from the active az login context instead of env var
-        SUBSCRIPTION=$(az account show --query id -o tsv)
-        echo "Resolved Subscription ID: $SUBSCRIPTION"
+        echo "Active subscription: $(az account show --query id -o tsv)"
+        echo "Active subscription name: $(az account show --query name -o tsv)"
 
-        # Create storage account if it doesn't exist
+        # Storage account - no --subscription flag, relies on az account set done at login
         if ! az storage account show \
             --name "$STORAGE_ACCOUNT" \
-            --resource-group "$RESOURCE_GROUP" \
-            --subscription "$SUBSCRIPTION" &>/dev/null; then
+            --resource-group "$RESOURCE_GROUP" &>/dev/null; then
           echo "Creating storage account: $STORAGE_ACCOUNT"
           az storage account create \
             --name "$STORAGE_ACCOUNT" \
             --resource-group "$RESOURCE_GROUP" \
             --location "$LOCATION" \
             --sku Standard_LRS \
-            --encryption-services blob \
-            --subscription "$SUBSCRIPTION"
+            --encryption-services blob
         else
           echo "Storage account already exists: $STORAGE_ACCOUNT"
         fi
 
-        # Create blob container if it doesn't exist
+        # Blob container
         if ! az storage container show \
             --name "$CONTAINER" \
             --account-name "$STORAGE_ACCOUNT" \
-            --subscription "$SUBSCRIPTION" &>/dev/null; then
+            --auth-mode login &>/dev/null; then
           echo "Creating container: $CONTAINER"
           az storage container create \
             --name "$CONTAINER" \
             --account-name "$STORAGE_ACCOUNT" \
-            --auth-mode login \
-            --subscription "$SUBSCRIPTION"
+            --auth-mode login
         else
           echo "Container already exists: $CONTAINER"
         fi
@@ -185,23 +176,20 @@ jobs:
         STORAGE_ACCOUNT="day0417691"
         CONTAINER="tfstate"
         LOCATION="westeurope"
-        SUBSCRIPTION=$(az account show --query id -o tsv)
 
-        if ! az storage account show --name "$STORAGE_ACCOUNT" --resource-group "$RESOURCE_GROUP" --subscription "$SUBSCRIPTION" &>/dev/null; then
+        if ! az storage account show --name "$STORAGE_ACCOUNT" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
           az storage account create \
             --name "$STORAGE_ACCOUNT" \
             --resource-group "$RESOURCE_GROUP" \
             --location "$LOCATION" \
             --sku Standard_LRS \
-            --encryption-services blob \
-            --subscription "$SUBSCRIPTION"
+            --encryption-services blob
         fi
-        if ! az storage container show --name "$CONTAINER" --account-name "$STORAGE_ACCOUNT" --subscription "$SUBSCRIPTION" &>/dev/null; then
+        if ! az storage container show --name "$CONTAINER" --account-name "$STORAGE_ACCOUNT" --auth-mode login &>/dev/null; then
           az storage container create \
             --name "$CONTAINER" \
             --account-name "$STORAGE_ACCOUNT" \
-            --auth-mode login \
-            --subscription "$SUBSCRIPTION"
+            --auth-mode login
         fi
 
     - name: Terraform init
@@ -267,23 +255,20 @@ jobs:
         STORAGE_ACCOUNT="day0417691"
         CONTAINER="tfstate"
         LOCATION="westeurope"
-        SUBSCRIPTION=$(az account show --query id -o tsv)
 
-        if ! az storage account show --name "$STORAGE_ACCOUNT" --resource-group "$RESOURCE_GROUP" --subscription "$SUBSCRIPTION" &>/dev/null; then
+        if ! az storage account show --name "$STORAGE_ACCOUNT" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
           az storage account create \
             --name "$STORAGE_ACCOUNT" \
             --resource-group "$RESOURCE_GROUP" \
             --location "$LOCATION" \
             --sku Standard_LRS \
-            --encryption-services blob \
-            --subscription "$SUBSCRIPTION"
+            --encryption-services blob
         fi
-        if ! az storage container show --name "$CONTAINER" --account-name "$STORAGE_ACCOUNT" --subscription "$SUBSCRIPTION" &>/dev/null; then
+        if ! az storage container show --name "$CONTAINER" --account-name "$STORAGE_ACCOUNT" --auth-mode login &>/dev/null; then
           az storage container create \
             --name "$CONTAINER" \
             --account-name "$STORAGE_ACCOUNT" \
-            --auth-mode login \
-            --subscription "$SUBSCRIPTION"
+            --auth-mode login
         fi
 
     - name: Terraform init
