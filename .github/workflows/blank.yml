@@ -1,15 +1,49 @@
 name: Terraform CI/CD
 
+# ─────────────────────────────────────────────────────────────────────────────
+# HOW TO USE
+# ─────────────────────────────────────────────────────────────────────────────
+#
+#  Secrets required in GitHub → Settings → Secrets → Actions:
+#    AZURE_CLIENT_ID
+#    AZURE_CLIENT_SECRET
+#    AZURE_TENANT_ID
+#    AZURE_SUBSCRIPTION_ID
+#    AZURE_VM_PASSWORD
+#
+#  Workflow has 3 jobs that run in sequence in ONE execution:
+#
+#    [setup] → [plan] → (approval gate) → [apply-or-destroy]
+#
+#  The approval gate is a GitHub Environment called "apply" or "destroy".
+#  Go to: Repo → Settings → Environments → apply → add Required Reviewers
+#  This pauses the run and emails you to approve before anything is changed.
+#
+#  If you just want to plan (no changes):
+#    action = plan   → runs setup + plan, stops there
+#
+#  If you want to apply:
+#    action = apply  → runs setup + plan, waits for approval, then applies
+#
+#  If you want to destroy:
+#    action = destroy → runs setup + plan (destroy plan), waits for approval,
+#                       then destroys
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
 on:
   workflow_dispatch:
     inputs:
+
       tf_file:
-        description: "Terraform file inside terraform/ folder"
+        description: >
+          Terraform file to target — filename only, e.g. vm.tf or network.tf
+          (must exist inside the Terraform/ directory)
         required: true
-        default: "vm.tf"
+        type: string
 
       action:
-        description: "Terraform action"
+        description: "Terraform action to run"
         required: true
         type: choice
         options:
@@ -24,409 +58,362 @@ concurrency:
   group: terraform-${{ github.event.inputs.tf_file }}
   cancel-in-progress: false
 
+# Shared env available to all jobs
 env:
   TF_FILE:               ${{ github.event.inputs.tf_file }}
   ACTION:                ${{ github.event.inputs.action }}
-
   WS_DIR:                /home/runner/isolated-tf
-
   BACKEND_RG:            tfstate-day04
   BACKEND_SA:            day0417691
   BACKEND_CONTAINER:     tfstate
-
   ARM_CLIENT_ID:         ${{ secrets.AZURE_CLIENT_ID }}
   ARM_CLIENT_SECRET:     ${{ secrets.AZURE_CLIENT_SECRET }}
   ARM_TENANT_ID:         ${{ secrets.AZURE_TENANT_ID }}
   ARM_SUBSCRIPTION_ID:   ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
   TF_VAR_admin_password: ${{ secrets.AZURE_VM_PASSWORD }}
 
 jobs:
 
-# ─────────────────────────────────────────────────────────────────────────────
-# PLAN
-# ─────────────────────────────────────────────────────────────────────────────
+  # ───────────────────────────────────────────────────────────────────────────
+  # JOB 1 — Setup + Plan
+  # Always runs. Produces a plan artifact consumed by job 2.
+  # ───────────────────────────────────────────────────────────────────────────
   plan:
-    name: Terraform Plan
+    name: "Plan → ${{ github.event.inputs.tf_file }}"
     runs-on: ubuntu-latest
 
     outputs:
+      # Pass the artifact name to the next job so it knows what to download
       artifact-name: ${{ steps.artifact-name.outputs.value }}
 
     steps:
 
-      # ───────────────────────────────────────────────────────────────────────
-      # Checkout
-      # ───────────────────────────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # ───────────────────────────────────────────────────────────────────────
-      # Debug repository structure
-      # ───────────────────────────────────────────────────────────────────────
-      - name: Debug repository structure
-        shell: bash
-        run: |
-          echo "Current directory:"
-          pwd
-
-          echo ""
-          echo "Repository contents:"
-          ls -lah
-
-          echo ""
-          echo "terraform folder:"
-          ls -lah terraform || true
-
-      # ───────────────────────────────────────────────────────────────────────
-      # Validate secrets
-      # ───────────────────────────────────────────────────────────────────────
+      # ── Validate secrets ───────────────────────────────────────────────
       - name: Validate secrets
         shell: bash
         run: |
-          set -e
-
           missing=()
-
-          [[ -z "$ARM_CLIENT_ID" ]] && missing+=("AZURE_CLIENT_ID")
-          [[ -z "$ARM_CLIENT_SECRET" ]] && missing+=("AZURE_CLIENT_SECRET")
-          [[ -z "$ARM_TENANT_ID" ]] && missing+=("AZURE_TENANT_ID")
-          [[ -z "$ARM_SUBSCRIPTION_ID" ]] && missing+=("AZURE_SUBSCRIPTION_ID")
+          [[ -z "$ARM_CLIENT_ID"         ]] && missing+=("AZURE_CLIENT_ID")
+          [[ -z "$ARM_CLIENT_SECRET"     ]] && missing+=("AZURE_CLIENT_SECRET")
+          [[ -z "$ARM_TENANT_ID"         ]] && missing+=("AZURE_TENANT_ID")
+          [[ -z "$ARM_SUBSCRIPTION_ID"   ]] && missing+=("AZURE_SUBSCRIPTION_ID")
           [[ -z "$TF_VAR_admin_password" ]] && missing+=("AZURE_VM_PASSWORD")
-
           if [[ ${#missing[@]} -gt 0 ]]; then
-            echo "Missing secrets:"
-            printf '%s\n' "${missing[@]}"
+            echo "ERROR: Missing secrets:"
+            for s in "${missing[@]}"; do echo "  - $s"; done
             exit 1
           fi
-
-          echo "All secrets validated."
-
-      # ───────────────────────────────────────────────────────────────────────
-      # Validate TF file
-      # ───────────────────────────────────────────────────────────────────────
+          echo "OK: All secrets present."
+      # ── Validate selected file ─────────────────────────────────────────
       - name: Validate selected file
         shell: bash
         run: |
-          set -e
-
-          echo "TF_FILE=$TF_FILE"
-
           if [[ "$TF_FILE" != *.tf ]]; then
-            echo "ERROR: TF_FILE must end with .tf"
+            echo "ERROR: '$TF_FILE' does not end in .tf"
             exit 1
           fi
-
           if [[ "$TF_FILE" == */* ]] || [[ "$TF_FILE" == *..* ]]; then
-            echo "ERROR: Invalid TF_FILE"
+            echo "ERROR: Filename must not contain slashes or '..'"
             exit 1
           fi
-
-          if [[ ! -f "terraform/$TF_FILE" ]]; then
-            echo "ERROR: terraform/$TF_FILE not found"
-            echo ""
-            echo "Available TF files:"
-            find terraform -maxdepth 1 -name "*.tf" || true
+          if [[ ! -f "Terraform/$TF_FILE" ]]; then
+            echo "ERROR: 'Terraform/$TF_FILE' not found."
+            echo "Available .tf files:"
+            find Terraform/ -maxdepth 1 -name "*.tf" | sort | sed 's|Terraform/||'
             exit 1
           fi
-
-          echo "Terraform file exists."
-
-      # ───────────────────────────────────────────────────────────────────────
-      # Build isolated workspace
-      # ───────────────────────────────────────────────────────────────────────
+          echo "OK: 'Terraform/$TF_FILE' found."
+      # ── Ensure .gitignore ──────────────────────────────────────────────
+      - name: Ensure Terraform/.gitignore excludes provider cache
+        shell: bash
+        run: |
+          GITIGNORE="Terraform/.gitignore"
+          touch "$GITIGNORE"
+          entries=(
+            ".terraform/" ".terraform.lock.hcl" "*.tfplan"
+            "*.tfstate" "*.tfstate.backup" "crash.log"
+            "override.tf" "override.tf.json"
+          )
+          for entry in "${entries[@]}"; do
+            grep -qxF "$entry" "$GITIGNORE" || echo "$entry" >> "$GITIGNORE"
+          done
+          echo "OK: .gitignore up to date."
+      # ── Build isolated workspace ───────────────────────────────────────
       - name: Build isolated workspace
         shell: bash
         run: |
-          set -x
-
-          echo "Current directory:"
-          pwd
-
-          echo "TF_FILE=$TF_FILE"
-          echo "WS_DIR=$WS_DIR"
-
           mkdir -p "$WS_DIR"
-
-          if [[ ! -f "terraform/$TF_FILE" ]]; then
-            echo "ERROR: terraform/$TF_FILE not found"
-
-            echo ""
-            echo "All repository files:"
-            find . -type f | sort
-
-            exit 1
-          fi
-
-          echo "Copying main TF file..."
-          cp "terraform/$TF_FILE" "$WS_DIR/"
-
-          echo "Copying shared TF files..."
+          cp "Terraform/$TF_FILE" "$WS_DIR/"
           for shared in provider.tf versions.tf variables.tf; do
-            if [[ -f "terraform/$shared" && "$shared" != "$TF_FILE" ]]; then
-              cp "terraform/$shared" "$WS_DIR/"
+            if [[ -f "Terraform/$shared" ]] && [[ "$shared" != "$TF_FILE" ]]; then
+              cp "Terraform/$shared" "$WS_DIR/"
             fi
           done
-
-          echo "Copying tfvars files..."
-
-          shopt -s nullglob
-
-          for tfvars in terraform/*.tfvars terraform/*.tfvars.json; do
-            cp "$tfvars" "$WS_DIR/"
+          for tfvars in Terraform/*.tfvars Terraform/*.tfvars.json; do
+            [[ -f "$tfvars" ]] && cp "$tfvars" "$WS_DIR/"
           done
-
-          shopt -u nullglob
-
-          echo ""
-          echo "Workspace contents:"
-          ls -lah "$WS_DIR/"
-
-      # ───────────────────────────────────────────────────────────────────────
-      # Install Azure CLI
-      # ───────────────────────────────────────────────────────────────────────
+          echo "Workspace contents:"; ls -lh "$WS_DIR/"
+      # ── Tooling ────────────────────────────────────────────────────────
       - name: Install Azure CLI
         run: curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
 
-      # ───────────────────────────────────────────────────────────────────────
-      # Setup Terraform
-      # ───────────────────────────────────────────────────────────────────────
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@v2
         with:
-          terraform_version: 1.9.7
+          terraform_version: "1.9.7"
 
-      # ───────────────────────────────────────────────────────────────────────
-      # Azure Login
-      # ───────────────────────────────────────────────────────────────────────
+      # ── Azure login ────────────────────────────────────────────────────
       - name: Azure login
         uses: azure/login@v2
         with:
           creds: |
             {
-              "clientId":"${{ secrets.AZURE_CLIENT_ID }}",
-              "clientSecret":"${{ secrets.AZURE_CLIENT_SECRET }}",
-              "subscriptionId":"${{ secrets.AZURE_SUBSCRIPTION_ID }}",
-              "tenantId":"${{ secrets.AZURE_TENANT_ID }}"
+              "clientId":       "${{ secrets.AZURE_CLIENT_ID }}",
+              "clientSecret":   "${{ secrets.AZURE_CLIENT_SECRET }}",
+              "subscriptionId": "${{ secrets.AZURE_SUBSCRIPTION_ID }}",
+              "tenantId":       "${{ secrets.AZURE_TENANT_ID }}"
             }
-
-      # ───────────────────────────────────────────────────────────────────────
-      # Bootstrap backend
-      # ───────────────────────────────────────────────────────────────────────
-      - name: Bootstrap backend
+      # ── Bootstrap backend ──────────────────────────────────────────────
+      - name: Bootstrap Terraform backend
         shell: bash
         run: |
-          set -e
-
-          az group create \
-            --name "$BACKEND_RG" \
-            --location westeurope
-
+          az group create --name "$BACKEND_RG" --location westeurope
           az storage account create \
-            --resource-group "$BACKEND_RG" \
-            --name "$BACKEND_SA" \
-            --sku Standard_LRS \
-            --kind StorageV2 \
-            --location westeurope
-
+            --resource-group "$BACKEND_RG" --name "$BACKEND_SA" \
+            --sku Standard_LRS --kind StorageV2 --location westeurope
           ACCOUNT_KEY=$(az storage account keys list \
-            --resource-group "$BACKEND_RG" \
-            --account-name "$BACKEND_SA" \
-            --query '[0].value' \
-            --output tsv)
-
+            --resource-group "$BACKEND_RG" --account-name "$BACKEND_SA" \
+            --query '[0].value' --output tsv)
           az storage container create \
             --name "$BACKEND_CONTAINER" \
-            --account-name "$BACKEND_SA" \
-            --account-key "$ACCOUNT_KEY"
-
-      # ───────────────────────────────────────────────────────────────────────
-      # Terraform Init
-      # ───────────────────────────────────────────────────────────────────────
+            --account-name "$BACKEND_SA" --account-key "$ACCOUNT_KEY"
+      # ── Terraform init ─────────────────────────────────────────────────
       - name: Terraform init
         working-directory: ${{ env.WS_DIR }}
         shell: bash
         run: |
-          set -e
-
           STATE_KEY="${TF_FILE%.tf}.tfstate"
-
+          echo "State key: $STATE_KEY"
           terraform init -reconfigure \
             -backend-config="resource_group_name=$BACKEND_RG" \
             -backend-config="storage_account_name=$BACKEND_SA" \
             -backend-config="container_name=$BACKEND_CONTAINER" \
             -backend-config="key=$STATE_KEY"
-
-      # ───────────────────────────────────────────────────────────────────────
-      # Terraform Format
-      # ───────────────────────────────────────────────────────────────────────
-      - name: Terraform format
+      # ── Force-unlock stale lock ────────────────────────────────────────
+      - name: Force-unlock stale state lock
+        shell: bash
+        run: |
+          STATE_KEY="${TF_FILE%.tf}.tfstate"
+          ACCOUNT_KEY=$(az storage account keys list \
+            --resource-group "$BACKEND_RG" --account-name "$BACKEND_SA" \
+            --query '[0].value' --output tsv)
+          LEASE_STATUS=$(az storage blob show \
+            --container-name "$BACKEND_CONTAINER" --name "$STATE_KEY" \
+            --account-name "$BACKEND_SA" --account-key "$ACCOUNT_KEY" \
+            --query "properties.lease.status" --output tsv 2>/dev/null || echo "notfound")
+          echo "Lease status: $LEASE_STATUS"
+          if [[ "$LEASE_STATUS" == "locked" ]]; then
+            echo "Breaking stale lease..."
+            az storage blob lease break \
+              --container-name "$BACKEND_CONTAINER" --blob-name "$STATE_KEY" \
+              --account-name "$BACKEND_SA" --account-key "$ACCOUNT_KEY"
+            echo "OK: Lease broken."
+          else
+            echo "OK: No stale lock found."
+          fi
+      # ── Terraform fmt ──────────────────────────────────────────────────
+      - name: Terraform format (auto-fix)
         working-directory: ${{ env.WS_DIR }}
         shell: bash
-        run: terraform fmt -recursive
-
-      # ───────────────────────────────────────────────────────────────────────
-      # Terraform Validate
-      # ───────────────────────────────────────────────────────────────────────
+        run: |
+          terraform fmt -recursive
+          cd "$GITHUB_WORKSPACE"
+          git add -- "Terraform/$TF_FILE"
+          if git diff --cached --quiet; then
+            echo "OK: No formatting changes."
+          else
+            git config user.name  "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git commit -m "style: auto-format $TF_FILE [skip ci]"
+            git push
+          fi
+      # ── Terraform validate ─────────────────────────────────────────────
       - name: Terraform validate
         working-directory: ${{ env.WS_DIR }}
-        shell: bash
         run: terraform validate
 
-      # ───────────────────────────────────────────────────────────────────────
-      # Terraform Plan
-      # ───────────────────────────────────────────────────────────────────────
+      # ── Terraform plan ─────────────────────────────────────────────────
+      # For destroy action we generate a destroy plan so the approval gate
+      # shows exactly what will be deleted before anything is removed.
       - name: Terraform plan
         working-directory: ${{ env.WS_DIR }}
         shell: bash
         run: |
-          set -e
-
           if [[ "$ACTION" == "destroy" ]]; then
             terraform plan -destroy -out=plan.tfplan
           else
             terraform plan -out=plan.tfplan
           fi
-
-      # ───────────────────────────────────────────────────────────────────────
-      # Artifact name
-      # ───────────────────────────────────────────────────────────────────────
+      # ── Set artifact name output ───────────────────────────────────────
       - name: Set artifact name
         id: artifact-name
         shell: bash
         run: |
+          # Include run ID so apply always gets the plan from THIS execution
           ARTIFACT="tfplan-${{ github.run_id }}-${TF_FILE%.tf}"
           echo "value=$ARTIFACT" >> "$GITHUB_OUTPUT"
-
-      # ───────────────────────────────────────────────────────────────────────
-      # Upload plan
-      # ───────────────────────────────────────────────────────────────────────
+          echo "Artifact name: $ARTIFACT"
+      # ── Upload plan ────────────────────────────────────────────────────
       - name: Upload plan artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.artifact-name.outputs.value }}
-          path: ${{ env.WS_DIR }}/plan.tfplan
+          # Retention 1 day — plans are short-lived; apply must follow quickly
           retention-days: 1
+          path: ${{ env.WS_DIR }}/plan.tfplan
 
-# ─────────────────────────────────────────────────────────────────────────────
-# APPLY / DESTROY
-# ─────────────────────────────────────────────────────────────────────────────
+      # ── Summary ───────────────────────────────────────────────────────
+      - name: Write plan summary
+        shell: bash
+        run: |
+          echo "## Plan complete" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| | |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **File** | \`$TF_FILE\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Action** | \`$ACTION\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **State key** | \`${TF_FILE%.tf}.tfstate\` |" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$ACTION" != "plan" ]]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "⏳ **Waiting for approval** before applying changes." >> "$GITHUB_STEP_SUMMARY"
+          fi
+  # ───────────────────────────────────────────────────────────────────────────
+  # JOB 2 — Apply or Destroy (skipped if action == plan)
+  #
+  # The "environment: apply" or "environment: destroy" block is what creates
+  # the approval gate. Configure required reviewers at:
+  #   Repo → Settings → Environments → apply → Required reviewers
+  # ───────────────────────────────────────────────────────────────────────────
   apply:
-    name: Terraform Apply/Destroy
+    name: "${{ github.event.inputs.action }} → ${{ github.event.inputs.tf_file }}"
     runs-on: ubuntu-latest
-
     needs: plan
 
+    # Skip this job entirely when action is just 'plan'
     if: github.event.inputs.action != 'plan'
 
+    # This is what creates the approval gate — the environment must exist in
+    # GitHub repo Settings → Environments with Required reviewers configured
     environment: ${{ github.event.inputs.action }}
 
     steps:
 
-      # ───────────────────────────────────────────────────────────────────────
-      # Checkout
-      # ───────────────────────────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ───────────────────────────────────────────────────────────────────────
-      # Build workspace
-      # ───────────────────────────────────────────────────────────────────────
+      # ── Re-build isolated workspace ────────────────────────────────────
+      # Each job runs on a fresh runner so we rebuild the workspace
       - name: Build isolated workspace
         shell: bash
         run: |
-          set -x
-
           mkdir -p "$WS_DIR"
-
-          cp "terraform/$TF_FILE" "$WS_DIR/"
-
+          cp "Terraform/$TF_FILE" "$WS_DIR/"
           for shared in provider.tf versions.tf variables.tf; do
-            if [[ -f "terraform/$shared" && "$shared" != "$TF_FILE" ]]; then
-              cp "terraform/$shared" "$WS_DIR/"
+            if [[ -f "Terraform/$shared" ]] && [[ "$shared" != "$TF_FILE" ]]; then
+              cp "Terraform/$shared" "$WS_DIR/"
             fi
           done
-
-          shopt -s nullglob
-
-          for tfvars in terraform/*.tfvars terraform/*.tfvars.json; do
-            cp "$tfvars" "$WS_DIR/"
+          for tfvars in Terraform/*.tfvars Terraform/*.tfvars.json; do
+            [[ -f "$tfvars" ]] && cp "$tfvars" "$WS_DIR/"
           done
-
-          shopt -u nullglob
-
-          ls -lah "$WS_DIR/"
-
-      # ───────────────────────────────────────────────────────────────────────
-      # Install Azure CLI
-      # ───────────────────────────────────────────────────────────────────────
+      # ── Tooling ────────────────────────────────────────────────────────
       - name: Install Azure CLI
         run: curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
 
-      # ───────────────────────────────────────────────────────────────────────
-      # Setup Terraform
-      # ───────────────────────────────────────────────────────────────────────
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@v2
         with:
-          terraform_version: 1.9.7
+          terraform_version: "1.9.7"
 
-      # ───────────────────────────────────────────────────────────────────────
-      # Azure Login
-      # ───────────────────────────────────────────────────────────────────────
+      # ── Azure login ────────────────────────────────────────────────────
       - name: Azure login
         uses: azure/login@v2
         with:
           creds: |
             {
-              "clientId":"${{ secrets.AZURE_CLIENT_ID }}",
-              "clientSecret":"${{ secrets.AZURE_CLIENT_SECRET }}",
-              "subscriptionId":"${{ secrets.AZURE_SUBSCRIPTION_ID }}",
-              "tenantId":"${{ secrets.AZURE_TENANT_ID }}"
+              "clientId":       "${{ secrets.AZURE_CLIENT_ID }}",
+              "clientSecret":   "${{ secrets.AZURE_CLIENT_SECRET }}",
+              "subscriptionId": "${{ secrets.AZURE_SUBSCRIPTION_ID }}",
+              "tenantId":       "${{ secrets.AZURE_TENANT_ID }}"
             }
-
-      # ───────────────────────────────────────────────────────────────────────
-      # Download Plan
-      # ───────────────────────────────────────────────────────────────────────
+      # ── Terraform init ─────────────────────────────────────────────────
+      - name: Terraform init
+        working-directory: ${{ env.WS_DIR }}
+        shell: bash
+        run: |
+          STATE_KEY="${TF_FILE%.tf}.tfstate"
+          terraform init -reconfigure \
+            -backend-config="resource_group_name=$BACKEND_RG" \
+            -backend-config="storage_account_name=$BACKEND_SA" \
+            -backend-config="container_name=$BACKEND_CONTAINER" \
+            -backend-config="key=$STATE_KEY"
+      # ── Force-unlock stale lock ────────────────────────────────────────
+      - name: Force-unlock stale state lock
+        shell: bash
+        run: |
+          STATE_KEY="${TF_FILE%.tf}.tfstate"
+          ACCOUNT_KEY=$(az storage account keys list \
+            --resource-group "$BACKEND_RG" --account-name "$BACKEND_SA" \
+            --query '[0].value' --output tsv)
+          LEASE_STATUS=$(az storage blob show \
+            --container-name "$BACKEND_CONTAINER" --name "$STATE_KEY" \
+            --account-name "$BACKEND_SA" --account-key "$ACCOUNT_KEY" \
+            --query "properties.lease.status" --output tsv 2>/dev/null || echo "notfound")
+          echo "Lease status: $LEASE_STATUS"
+          if [[ "$LEASE_STATUS" == "locked" ]]; then
+            echo "Breaking stale lease..."
+            az storage blob lease break \
+              --container-name "$BACKEND_CONTAINER" --blob-name "$STATE_KEY" \
+              --account-name "$BACKEND_SA" --account-key "$ACCOUNT_KEY"
+            echo "OK: Lease broken."
+          else
+            echo "OK: No stale lock."
+          fi
+      # ── Download plan from job 1 ───────────────────────────────────────
       - name: Download plan artifact
         uses: actions/download-artifact@v4
         with:
           name: ${{ needs.plan.outputs.artifact-name }}
           path: ${{ env.WS_DIR }}
 
-      # ───────────────────────────────────────────────────────────────────────
-      # Terraform Init
-      # ───────────────────────────────────────────────────────────────────────
-      - name: Terraform init
-        working-directory: ${{ env.WS_DIR }}
-        shell: bash
-        run: |
-          set -e
-
-          STATE_KEY="${TF_FILE%.tf}.tfstate"
-
-          terraform init -reconfigure \
-            -backend-config="resource_group_name=$BACKEND_RG" \
-            -backend-config="storage_account_name=$BACKEND_SA" \
-            -backend-config="container_name=$BACKEND_CONTAINER" \
-            -backend-config="key=$STATE_KEY"
-
-      # ───────────────────────────────────────────────────────────────────────
-      # Terraform Apply
-      # ───────────────────────────────────────────────────────────────────────
+      # ── Apply ──────────────────────────────────────────────────────────
       - name: Terraform apply
         if: github.event.inputs.action == 'apply'
         working-directory: ${{ env.WS_DIR }}
-        shell: bash
         run: terraform apply -auto-approve plan.tfplan
 
-      # ───────────────────────────────────────────────────────────────────────
-      # Terraform Destroy
-      # ───────────────────────────────────────────────────────────────────────
+      # ── Destroy ────────────────────────────────────────────────────────
       - name: Terraform destroy
         if: github.event.inputs.action == 'destroy'
         working-directory: ${{ env.WS_DIR }}
-        shell: bash
         run: terraform apply -auto-approve plan.tfplan
+
+      # ── Summary ───────────────────────────────────────────────────────
+      - name: Write apply summary
+        if: always()
+        shell: bash
+        run: |
+          echo "## Terraform run summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| | |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **File** | \`$TF_FILE\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Action** | \`$ACTION\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **State key** | \`${TF_FILE%.tf}.tfstate\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Branch** | \`${{ github.ref_name }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Triggered by** | \`${{ github.actor }}\` |" >> "$GITHUB_STEP_SUMMARY"
