@@ -156,7 +156,10 @@ jobs:
   apply:
     name: Terraform Apply
     needs: plan
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.run_apply == 'true'
+    # Runs automatically on push to main4, or manually when run_apply=true
+    if: |
+      (github.ref == 'refs/heads/main4' && github.event_name == 'push') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.run_apply == 'true')
     runs-on: ubuntu-latest
     env:
       ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
