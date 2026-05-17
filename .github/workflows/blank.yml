@@ -41,14 +41,92 @@ jobs:
         if [ -z "${{ secrets.AZURE_TENANT_ID }}" ]; then echo 'Missing AZURE_TENANT_ID'; exit 1; fi
         if [ -z "${{ secrets.AZURE_SUBSCRIPTION_ID }}" ]; then echo 'Missing AZURE_SUBSCRIPTION_ID'; exit 1; fi
 
-    - name: Debug secret presence
+    - name: Bootstrap Terraform backend via REST API
+      shell: bash
       run: |
-        echo "Tenant set:       ${{ secrets.AZURE_TENANT_ID != '' }}"
-        echo "Client ID set:    ${{ secrets.AZURE_CLIENT_ID != '' }}"
-        echo "Client Secret set:${{ secrets.AZURE_CLIENT_SECRET != '' }}"
-        echo "Subscription set: ${{ secrets.AZURE_SUBSCRIPTION_ID != '' }}"
+        RESOURCE_GROUP="tfstate-day04"
+        STORAGE_ACCOUNT="day0417691"
+        CONTAINER="tfstate"
+        LOCATION="westeurope"
+        TENANT_ID="${ARM_TENANT_ID}"
+        CLIENT_ID="${ARM_CLIENT_ID}"
+        CLIENT_SECRET="${ARM_CLIENT_SECRET}"
+        SUBSCRIPTION_ID="${ARM_SUBSCRIPTION_ID}"
 
-    - name: Azure login
+        echo "Step 1: Get access token"
+        TOKEN=$(curl -s -X POST \
+          "https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token" \
+          -H "Content-Type: application/x-www-form-urlencoded" \
+          -d "grant_type=client_credentials" \
+          -d "client_id=${CLIENT_ID}" \
+          -d "client_secret=${CLIENT_SECRET}" \
+          -d "scope=https://management.azure.com/.default" \
+          | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+
+        if [ -z "$TOKEN" ]; then
+          echo "ERROR: Failed to get access token"
+          exit 1
+        fi
+        echo "Token acquired successfully"
+
+        BASE="https://management.azure.com/subscriptions/${SUBSCRIPTION_ID}"
+
+        echo "Step 2: Create resource group"
+        curl -s -X PUT \
+          "${BASE}/resourcegroups/${RESOURCE_GROUP}?api-version=2021-04-01" \
+          -H "Authorization: Bearer ${TOKEN}" \
+          -H "Content-Type: application/json" \
+          -d "{\"location\": \"${LOCATION}\"}" | python3 -c "import sys,json; r=json.load(sys.stdin); print('RG:', r.get('properties',{}).get('provisioningState', r))"
+
+        echo "Step 3: Create storage account"
+        SA_RESPONSE=$(curl -s -X PUT \
+          "${BASE}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.Storage/storageAccounts/${STORAGE_ACCOUNT}?api-version=2023-01-01" \
+          -H "Authorization: Bearer ${TOKEN}" \
+          -H "Content-Type: application/json" \
+          -d "{
+            \"sku\": {\"name\": \"Standard_LRS\"},
+            \"kind\": \"StorageV2\",
+            \"location\": \"${LOCATION}\",
+            \"properties\": {\"minimumTlsVersion\": \"TLS1_2\"}
+          }")
+        echo "Storage response: $(echo $SA_RESPONSE | python3 -c "import sys,json; r=json.load(sys.stdin); print(r.get('error', r.get('properties',{}).get('provisioningState','submitted')))")"
+
+        echo "Step 4: Wait for storage account to be ready"
+        for i in {1..12}; do
+          STATE=$(curl -s \
+            "${BASE}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.Storage/storageAccounts/${STORAGE_ACCOUNT}?api-version=2023-01-01" \
+            -H "Authorization: Bearer ${TOKEN}" \
+            | python3 -c "import sys,json; print(json.load(sys.stdin).get('properties',{}).get('provisioningState','unknown'))")
+          echo "  Provisioning state: $STATE"
+          if [ "$STATE" = "Succeeded" ]; then break; fi
+          sleep 10
+        done
+
+        echo "Step 5: Get storage account key"
+        SA_KEY=$(curl -s -X POST \
+          "${BASE}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.Storage/storageAccounts/${STORAGE_ACCOUNT}/listKeys?api-version=2023-01-01" \
+          -H "Authorization: Bearer ${TOKEN}" \
+          -H "Content-Type: application/json" \
+          -d "{}" \
+          | python3 -c "import sys,json; print(json.load(sys.stdin)['keys'][0]['value'])")
+
+        if [ -z "$SA_KEY" ]; then
+          echo "ERROR: Could not retrieve storage account key"
+          exit 1
+        fi
+        echo "Storage key retrieved"
+
+        echo "Step 6: Create blob container"
+        az login --service-principal \
+          -u "$CLIENT_ID" -p "$CLIENT_SECRET" --tenant "$TENANT_ID" --output none
+        az storage container create \
+          --name "$CONTAINER" \
+          --account-name "$STORAGE_ACCOUNT" \
+          --account-key "$SA_KEY" 2>&1 || echo "Container may already exist"
+
+        echo "Bootstrap complete"
+
+    - name: Azure login for Terraform
       shell: bash
       run: |
         az login --service-principal \
@@ -56,63 +134,6 @@ jobs:
           -p "$ARM_CLIENT_SECRET" \
           --tenant "$ARM_TENANT_ID"
         az account set --subscription "$ARM_SUBSCRIPTION_ID"
-
-    - name: Diagnose subscription access
-      shell: bash
-      run: |
-        echo "=== Active account ==="
-        az account show
-        echo ""
-        echo "=== All accessible subscriptions ==="
-        az account list --output table
-        echo ""
-        echo "=== SP role assignments ==="
-        az role assignment list --assignee "$ARM_CLIENT_ID" --output table
-
-    - name: Bootstrap Terraform backend
-      shell: bash
-      run: |
-        RESOURCE_GROUP="tfstate-day04"
-        STORAGE_ACCOUNT="day0417691"
-        CONTAINER="tfstate"
-        LOCATION="westeurope"
-
-        # Capture subscription ID directly from the live session - avoids env var encoding issues
-        SUB_ID=$(az account show --query id --output tsv | tr -d '[:space:]')
-        echo "Using subscription: $SUB_ID"
-
-        # Storage account
-        if ! az storage account show \
-            --name "$STORAGE_ACCOUNT" \
-            --resource-group "$RESOURCE_GROUP" \
-            --subscription "$SUB_ID" &>/dev/null; then
-          echo "Creating storage account: $STORAGE_ACCOUNT"
-          az storage account create \
-            --name "$STORAGE_ACCOUNT" \
-            --resource-group "$RESOURCE_GROUP" \
-            --location "$LOCATION" \
-            --sku Standard_LRS \
-            --encryption-services blob \
-            --subscription "$SUB_ID"
-        else
-          echo "Storage account already exists: $STORAGE_ACCOUNT"
-        fi
-
-        # Blob container
-        if ! az storage container show \
-            --name "$CONTAINER" \
-            --account-name "$STORAGE_ACCOUNT" \
-            --auth-mode login \
-            --subscription "$SUB_ID" &>/dev/null; then
-          echo "Creating container: $CONTAINER"
-          az storage container create \
-            --name "$CONTAINER" \
-            --account-name "$STORAGE_ACCOUNT" \
-            --auth-mode login \
-            --subscription "$SUB_ID"
-        else
-          echo "Container already exists: $CONTAINER"
-        fi
 
     - name: Terraform init
       working-directory: Terraform
@@ -151,20 +172,6 @@ jobs:
       with:
         terraform_version: '1.9.7'
 
-    - name: Check Azure secrets
-      run: |
-        if [ -z "${{ secrets.AZURE_CLIENT_ID }}" ]; then echo 'Missing AZURE_CLIENT_ID'; exit 1; fi
-        if [ -z "${{ secrets.AZURE_CLIENT_SECRET }}" ]; then echo 'Missing AZURE_CLIENT_SECRET'; exit 1; fi
-        if [ -z "${{ secrets.AZURE_TENANT_ID }}" ]; then echo 'Missing AZURE_TENANT_ID'; exit 1; fi
-        if [ -z "${{ secrets.AZURE_SUBSCRIPTION_ID }}" ]; then echo 'Missing AZURE_SUBSCRIPTION_ID'; exit 1; fi
-
-    - name: Debug secret presence
-      run: |
-        echo "Tenant set:        ${{ secrets.AZURE_TENANT_ID != '' }}"
-        echo "Client ID set:     ${{ secrets.AZURE_CLIENT_ID != '' }}"
-        echo "Client Secret set: ${{ secrets.AZURE_CLIENT_SECRET != '' }}"
-        echo "Subscription set:  ${{ secrets.AZURE_SUBSCRIPTION_ID != '' }}"
-
     - name: Azure login
       shell: bash
       run: |
@@ -173,32 +180,6 @@ jobs:
           -p "$ARM_CLIENT_SECRET" \
           --tenant "$ARM_TENANT_ID"
         az account set --subscription "$ARM_SUBSCRIPTION_ID"
-
-    - name: Bootstrap Terraform backend
-      shell: bash
-      run: |
-        RESOURCE_GROUP="tfstate-day04"
-        STORAGE_ACCOUNT="day0417691"
-        CONTAINER="tfstate"
-        LOCATION="westeurope"
-        SUB_ID=$(az account show --query id --output tsv | tr -d '[:space:]')
-
-        if ! az storage account show --name "$STORAGE_ACCOUNT" --resource-group "$RESOURCE_GROUP" --subscription "$SUB_ID" &>/dev/null; then
-          az storage account create \
-            --name "$STORAGE_ACCOUNT" \
-            --resource-group "$RESOURCE_GROUP" \
-            --location "$LOCATION" \
-            --sku Standard_LRS \
-            --encryption-services blob \
-            --subscription "$SUB_ID"
-        fi
-        if ! az storage container show --name "$CONTAINER" --account-name "$STORAGE_ACCOUNT" --auth-mode login --subscription "$SUB_ID" &>/dev/null; then
-          az storage container create \
-            --name "$CONTAINER" \
-            --account-name "$STORAGE_ACCOUNT" \
-            --auth-mode login \
-            --subscription "$SUB_ID"
-        fi
 
     - name: Terraform init
       working-directory: Terraform
@@ -233,20 +214,6 @@ jobs:
       with:
         terraform_version: '1.9.7'
 
-    - name: Check Azure secrets
-      run: |
-        if [ -z "${{ secrets.AZURE_CLIENT_ID }}" ]; then echo 'Missing AZURE_CLIENT_ID'; exit 1; fi
-        if [ -z "${{ secrets.AZURE_CLIENT_SECRET }}" ]; then echo 'Missing AZURE_CLIENT_SECRET'; exit 1; fi
-        if [ -z "${{ secrets.AZURE_TENANT_ID }}" ]; then echo 'Missing AZURE_TENANT_ID'; exit 1; fi
-        if [ -z "${{ secrets.AZURE_SUBSCRIPTION_ID }}" ]; then echo 'Missing AZURE_SUBSCRIPTION_ID'; exit 1; fi
-
-    - name: Debug secret presence
-      run: |
-        echo "Tenant set:        ${{ secrets.AZURE_TENANT_ID != '' }}"
-        echo "Client ID set:     ${{ secrets.AZURE_CLIENT_ID != '' }}"
-        echo "Client Secret set: ${{ secrets.AZURE_CLIENT_SECRET != '' }}"
-        echo "Subscription set:  ${{ secrets.AZURE_SUBSCRIPTION_ID != '' }}"
-
     - name: Azure login
       shell: bash
       run: |
@@ -255,32 +222,6 @@ jobs:
           -p "$ARM_CLIENT_SECRET" \
           --tenant "$ARM_TENANT_ID"
         az account set --subscription "$ARM_SUBSCRIPTION_ID"
-
-    - name: Bootstrap Terraform backend
-      shell: bash
-      run: |
-        RESOURCE_GROUP="tfstate-day04"
-        STORAGE_ACCOUNT="day0417691"
-        CONTAINER="tfstate"
-        LOCATION="westeurope"
-        SUB_ID=$(az account show --query id --output tsv | tr -d '[:space:]')
-
-        if ! az storage account show --name "$STORAGE_ACCOUNT" --resource-group "$RESOURCE_GROUP" --subscription "$SUB_ID" &>/dev/null; then
-          az storage account create \
-            --name "$STORAGE_ACCOUNT" \
-            --resource-group "$RESOURCE_GROUP" \
-            --location "$LOCATION" \
-            --sku Standard_LRS \
-            --encryption-services blob \
-            --subscription "$SUB_ID"
-        fi
-        if ! az storage container show --name "$CONTAINER" --account-name "$STORAGE_ACCOUNT" --auth-mode login --subscription "$SUB_ID" &>/dev/null; then
-          az storage container create \
-            --name "$CONTAINER" \
-            --account-name "$STORAGE_ACCOUNT" \
-            --auth-mode login \
-            --subscription "$SUB_ID"
-        fi
 
     - name: Terraform init
       working-directory: Terraform
