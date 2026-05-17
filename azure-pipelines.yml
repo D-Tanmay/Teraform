@@ -1,104 +1,393 @@
-trigger:
-  branches:
-    include:
-      - main4
+trigger: none
 
-pr:
-  branches:
-    include:
-      - main4
+pr: none
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AZURE DEVOPS TERRAFORM PIPELINE
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Required Variable Group / Pipeline Variables:
+#
+#   AZURE_CLIENT_ID
+#   AZURE_CLIENT_SECRET
+#   AZURE_TENANT_ID
+#   AZURE_SUBSCRIPTION_ID
+#   AZURE_VM_PASSWORD
+#
+# Create these as secret variables in Azure DevOps Library or Pipeline vars.
+#
+# Required Service Connection:
+#   Not required because login is done via az login SPN.
+#
+# Usage:
+#   Run pipeline manually and provide:
+#     tf_file = vm.tf
+#     action  = plan/apply/destroy
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+parameters:
+  - name: tf_file
+    displayName: Terraform file
+    type: string
+    default: vm.tf
+
+  - name: action
+    displayName: Terraform Action
+    type: string
+    default: plan
+    values:
+      - plan
+      - apply
+      - destroy
 
 variables:
-  terraformVersion: '1.9.7'
-  tfWorkingDirectory: 'Terraform'
-  planFile: '$(Pipeline.Workspace)/terraform.plan'
+  TF_FILE: ${{ parameters.tf_file }}
+  ACTION: ${{ parameters.action }}
+
+  WS_DIR: "$(Agent.TempDirectory)/isolated-tf"
+
+  BACKEND_RG: "tfstate-day04"
+  BACKEND_SA: "day0417691"
+  BACKEND_CONTAINER: "tfstate"
 
 stages:
-- stage: TerraformPlan
-  displayName: 'Terraform Plan'
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE 1 — PLAN
+# ─────────────────────────────────────────────────────────────────────────────
+- stage: Plan
+  displayName: "Terraform Plan"
+
   jobs:
-  - job: Plan
-    displayName: 'Run Terraform init/validate/plan'
-    pool:
-      vmImage: 'ubuntu-latest'
-    steps:
-    - checkout: self
+    - job: Plan
+      displayName: "Plan Terraform"
+      pool:
+        vmImage: ubuntu-latest
 
-    - task: AzureCLI@2
-      displayName: 'Azure login and Terraform plan'
-      inputs:
-        azureSubscription: 'Terraform-SP2'
-        scriptType: bash
-        scriptLocation: inlineScript
-        inlineScript: |
-          sudo apt-get update -y
-          sudo apt-get install -y unzip curl
-          curl -fsSL https://releases.hashicorp.com/terraform/$(terraformVersion)/terraform_$(terraformVersion)_linux_amd64.zip -o terraform.zip
-          unzip -o terraform.zip
-          sudo mv terraform /usr/local/bin/
-          terraform version
+      steps:
 
-          cd $(tfWorkingDirectory)
-          terraform init -reconfigure
-          terraform validate
-          terraform plan -out="$(planFile)"
+        # ───────────────────────────────────────────────────────────────────
+        # Checkout
+        # ───────────────────────────────────────────────────────────────────
+        - checkout: self
+          persistCredentials: true
+          fetchDepth: 0
 
-- stage: TerraformApply
-  displayName: 'Terraform Apply'
-  dependsOn: TerraformPlan
-  condition: succeeded()
+        # ───────────────────────────────────────────────────────────────────
+        # Validate tf file
+        # ───────────────────────────────────────────────────────────────────
+        - bash: |
+            set -e
+
+            echo "Validating Terraform file..."
+
+            if [[ "$(TF_FILE)" != *.tf ]]; then
+              echo "ERROR: File must end with .tf"
+              exit 1
+            fi
+
+            if [[ "$(TF_FILE)" == */* ]] || [[ "$(TF_FILE)" == *..* ]]; then
+              echo "ERROR: Invalid filename"
+              exit 1
+            fi
+
+            if [[ ! -f "Terraform/$(TF_FILE)" ]]; then
+              echo "ERROR: Terraform/$(TF_FILE) not found"
+              exit 1
+            fi
+
+            echo "Validation successful"
+          displayName: "Validate TF file"
+
+        # ───────────────────────────────────────────────────────────────────
+        # Build isolated workspace
+        # ───────────────────────────────────────────────────────────────────
+        - bash: |
+            set -e
+
+            mkdir -p "$(WS_DIR)"
+
+            cp "Terraform/$(TF_FILE)" "$(WS_DIR)/"
+
+            for shared in provider.tf versions.tf variables.tf; do
+              if [[ -f "Terraform/$shared" ]] && [[ "$shared" != "$(TF_FILE)" ]]; then
+                cp "Terraform/$shared" "$(WS_DIR)/"
+              fi
+            done
+
+            for tfvars in Terraform/*.tfvars Terraform/*.tfvars.json; do
+              [[ -f "$tfvars" ]] && cp "$tfvars" "$(WS_DIR)/"
+            done
+
+            echo "Workspace contents:"
+            ls -lh "$(WS_DIR)"
+          displayName: "Build isolated workspace"
+
+        # ───────────────────────────────────────────────────────────────────
+        # Install Terraform
+        # ───────────────────────────────────────────────────────────────────
+        - task: TerraformInstaller@1
+          displayName: "Install Terraform"
+          inputs:
+            terraformVersion: "1.9.7"
+
+        # ───────────────────────────────────────────────────────────────────
+        # Azure Login
+        # ───────────────────────────────────────────────────────────────────
+        - bash: |
+            set -e
+
+            az login --service-principal \
+              --username "$(AZURE_CLIENT_ID)" \
+              --password "$(AZURE_CLIENT_SECRET)" \
+              --tenant "$(AZURE_TENANT_ID)"
+
+            az account set \
+              --subscription "$(AZURE_SUBSCRIPTION_ID)"
+
+            az account show
+          displayName: "Azure Login"
+
+        # ───────────────────────────────────────────────────────────────────
+        # Bootstrap backend
+        # ───────────────────────────────────────────────────────────────────
+        - bash: |
+            set -e
+
+            az group create \
+              --name "$(BACKEND_RG)" \
+              --location westeurope
+
+            az storage account create \
+              --resource-group "$(BACKEND_RG)" \
+              --name "$(BACKEND_SA)" \
+              --sku Standard_LRS \
+              --kind StorageV2 \
+              --location westeurope
+
+            ACCOUNT_KEY=$(az storage account keys list \
+              --resource-group "$(BACKEND_RG)" \
+              --account-name "$(BACKEND_SA)" \
+              --query '[0].value' \
+              --output tsv)
+
+            az storage container create \
+              --name "$(BACKEND_CONTAINER)" \
+              --account-name "$(BACKEND_SA)" \
+              --account-key "$ACCOUNT_KEY"
+          displayName: "Bootstrap backend"
+
+        # ───────────────────────────────────────────────────────────────────
+        # Terraform Init
+        # ───────────────────────────────────────────────────────────────────
+        - bash: |
+            set -e
+
+            cd "$(WS_DIR)"
+
+            STATE_KEY="${TF_FILE%.tf}.tfstate"
+
+            terraform init -reconfigure \
+              -backend-config="resource_group_name=$(BACKEND_RG)" \
+              -backend-config="storage_account_name=$(BACKEND_SA)" \
+              -backend-config="container_name=$(BACKEND_CONTAINER)" \
+              -backend-config="key=$STATE_KEY"
+          displayName: "Terraform Init"
+          env:
+            ARM_CLIENT_ID: $(AZURE_CLIENT_ID)
+            ARM_CLIENT_SECRET: $(AZURE_CLIENT_SECRET)
+            ARM_TENANT_ID: $(AZURE_TENANT_ID)
+            ARM_SUBSCRIPTION_ID: $(AZURE_SUBSCRIPTION_ID)
+
+        # ───────────────────────────────────────────────────────────────────
+        # Terraform Format
+        # ───────────────────────────────────────────────────────────────────
+        - bash: |
+            set -e
+
+            cd "$(WS_DIR)"
+
+            terraform fmt -recursive
+          displayName: "Terraform Format"
+
+        # ───────────────────────────────────────────────────────────────────
+        # Terraform Validate
+        # ───────────────────────────────────────────────────────────────────
+        - bash: |
+            set -e
+
+            cd "$(WS_DIR)"
+
+            terraform validate
+          displayName: "Terraform Validate"
+
+        # ───────────────────────────────────────────────────────────────────
+        # Terraform Plan
+        # ───────────────────────────────────────────────────────────────────
+        - bash: |
+            set -e
+
+            cd "$(WS_DIR)"
+
+            if [[ "$(ACTION)" == "destroy" ]]; then
+              terraform plan -destroy -out=plan.tfplan
+            else
+              terraform plan -out=plan.tfplan
+            fi
+          displayName: "Terraform Plan"
+          env:
+            ARM_CLIENT_ID: $(AZURE_CLIENT_ID)
+            ARM_CLIENT_SECRET: $(AZURE_CLIENT_SECRET)
+            ARM_TENANT_ID: $(AZURE_TENANT_ID)
+            ARM_SUBSCRIPTION_ID: $(AZURE_SUBSCRIPTION_ID)
+            TF_VAR_admin_password: $(AZURE_VM_PASSWORD)
+
+        # ───────────────────────────────────────────────────────────────────
+        # Publish artifact
+        # ───────────────────────────────────────────────────────────────────
+        - task: PublishPipelineArtifact@1
+          displayName: "Publish Plan Artifact"
+          inputs:
+            targetPath: "$(WS_DIR)/plan.tfplan"
+            artifact: "tfplan"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE 2 — APPLY / DESTROY
+# ─────────────────────────────────────────────────────────────────────────────
+- stage: Apply
+  displayName: "Terraform Apply/Destroy"
+
+  dependsOn: Plan
+
+  condition: and(
+    succeeded(),
+    ne('${{ parameters.action }}', 'plan')
+  )
+
   jobs:
-  - job: Apply
-    displayName: 'Apply Terraform'
-    pool:
-      vmImage: 'ubuntu-latest'
-    steps:
-    - checkout: self
 
-    - task: AzureCLI@2
-      displayName: 'Azure login and Terraform apply'
-      inputs:
-        azureSubscription: 'Terraform-SP2'
-        scriptType: bash
-        scriptLocation: inlineScript
-        inlineScript: |
-          sudo apt-get update -y
-          sudo apt-get install -y unzip curl
-          curl -fsSL https://releases.hashicorp.com/terraform/$(terraformVersion)/terraform_$(terraformVersion)_linux_amd64.zip -o terraform.zip
-          unzip -o terraform.zip
-          sudo mv terraform /usr/local/bin/
-          terraform version
+    - deployment: ApplyTerraform
+      displayName: "Apply or Destroy"
 
-          cd $(tfWorkingDirectory)
-          terraform init -reconfigure
-          terraform apply -auto-approve "$(planFile)"
+      environment: "${{ parameters.action }}"
 
-- stage: TerraformDestroy
-  displayName: 'Terraform Destroy'
-  dependsOn: TerraformApply
-  condition: succeeded()
-  jobs:
-  - job: Destroy
-    displayName: 'Destroy Terraform resources'
-    pool:
-      vmImage: 'ubuntu-latest'
-    steps:
-    - checkout: self
+      pool:
+        vmImage: ubuntu-latest
 
-    - task: AzureCLI@2
-      displayName: 'Azure login and Terraform destroy'
-      inputs:
-        azureSubscription: 'Terraform-SP2'
-        scriptType: bash
-        scriptLocation: inlineScript
-        inlineScript: |
-          sudo apt-get update -y
-          sudo apt-get install -y unzip curl
-          curl -fsSL https://releases.hashicorp.com/terraform/$(terraformVersion)/terraform_$(terraformVersion)_linux_amd64.zip -o terraform.zip
-          unzip -o terraform.zip
-          sudo mv terraform /usr/local/bin/
-          terraform version
+      strategy:
+        runOnce:
+          deploy:
 
-          cd $(tfWorkingDirectory)
-          terraform init -reconfigure
-          terraform destroy -auto-approve
+            steps:
+
+              - checkout: self
+
+              # ────────────────────────────────────────────────────────────
+              # Download artifact
+              # ────────────────────────────────────────────────────────────
+              - task: DownloadPipelineArtifact@2
+                displayName: "Download Plan Artifact"
+                inputs:
+                  artifact: "tfplan"
+                  path: "$(WS_DIR)"
+
+              # ────────────────────────────────────────────────────────────
+              # Rebuild workspace
+              # ────────────────────────────────────────────────────────────
+              - bash: |
+                  set -e
+
+                  cp "Terraform/$(TF_FILE)" "$(WS_DIR)/"
+
+                  for shared in provider.tf versions.tf variables.tf; do
+                    if [[ -f "Terraform/$shared" ]] && [[ "$shared" != "$(TF_FILE)" ]]; then
+                      cp "Terraform/$shared" "$(WS_DIR)/"
+                    fi
+                  done
+
+                  for tfvars in Terraform/*.tfvars Terraform/*.tfvars.json; do
+                    [[ -f "$tfvars" ]] && cp "$tfvars" "$(WS_DIR)/"
+                  done
+                displayName: "Build isolated workspace"
+
+              # ────────────────────────────────────────────────────────────
+              # Install Terraform
+              # ────────────────────────────────────────────────────────────
+              - task: TerraformInstaller@1
+                displayName: "Install Terraform"
+                inputs:
+                  terraformVersion: "1.9.7"
+
+              # ────────────────────────────────────────────────────────────
+              # Azure Login
+              # ────────────────────────────────────────────────────────────
+              - bash: |
+                  set -e
+
+                  az login --service-principal \
+                    --username "$(AZURE_CLIENT_ID)" \
+                    --password "$(AZURE_CLIENT_SECRET)" \
+                    --tenant "$(AZURE_TENANT_ID)"
+
+                  az account set \
+                    --subscription "$(AZURE_SUBSCRIPTION_ID)"
+                displayName: "Azure Login"
+
+              # ────────────────────────────────────────────────────────────
+              # Terraform Init
+              # ────────────────────────────────────────────────────────────
+              - bash: |
+                  set -e
+
+                  cd "$(WS_DIR)"
+
+                  STATE_KEY="${TF_FILE%.tf}.tfstate"
+
+                  terraform init -reconfigure \
+                    -backend-config="resource_group_name=$(BACKEND_RG)" \
+                    -backend-config="storage_account_name=$(BACKEND_SA)" \
+                    -backend-config="container_name=$(BACKEND_CONTAINER)" \
+                    -backend-config="key=$STATE_KEY"
+                displayName: "Terraform Init"
+                env:
+                  ARM_CLIENT_ID: $(AZURE_CLIENT_ID)
+                  ARM_CLIENT_SECRET: $(AZURE_CLIENT_SECRET)
+                  ARM_TENANT_ID: $(AZURE_TENANT_ID)
+                  ARM_SUBSCRIPTION_ID: $(AZURE_SUBSCRIPTION_ID)
+
+              # ────────────────────────────────────────────────────────────
+              # Terraform Apply
+              # ────────────────────────────────────────────────────────────
+              - bash: |
+                  set -e
+
+                  cd "$(WS_DIR)"
+
+                  terraform apply -auto-approve plan.tfplan
+                displayName: "Terraform Apply"
+                condition: eq('${{ parameters.action }}', 'apply')
+                env:
+                  ARM_CLIENT_ID: $(AZURE_CLIENT_ID)
+                  ARM_CLIENT_SECRET: $(AZURE_CLIENT_SECRET)
+                  ARM_TENANT_ID: $(AZURE_TENANT_ID)
+                  ARM_SUBSCRIPTION_ID: $(AZURE_SUBSCRIPTION_ID)
+                  TF_VAR_admin_password: $(AZURE_VM_PASSWORD)
+
+              # ────────────────────────────────────────────────────────────
+              # Terraform Destroy
+              # ────────────────────────────────────────────────────────────
+              - bash: |
+                  set -e
+
+                  cd "$(WS_DIR)"
+
+                  terraform apply -auto-approve plan.tfplan
+                displayName: "Terraform Destroy"
+                condition: eq('${{ parameters.action }}', 'destroy')
+                env:
+                  ARM_CLIENT_ID: $(AZURE_CLIENT_ID)
+                  ARM_CLIENT_SECRET: $(AZURE_CLIENT_SECRET)
+                  ARM_TENANT_ID: $(AZURE_TENANT_ID)
+                  ARM_SUBSCRIPTION_ID: $(AZURE_SUBSCRIPTION_ID)
+                  TF_VAR_admin_password: $(AZURE_VM_PASSWORD)
