@@ -39,7 +39,7 @@ stages:
           terraform version
 
           cd $(tfWorkingDirectory)
-          terraform init
+          terraform init -reconfigure
           terraform validate
           terraform plan -out="$(planFile)"
 
@@ -99,4 +99,5 @@ stages:
           terraform version
 
           cd $(tfWorkingDirectory)
+          terraform init -reconfigure
           terraform destroy -auto-approve
