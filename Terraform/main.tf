@@ -1,218 +1,40 @@
-name: Terraform CI/CD
+terraform {
+  required_providers {
+    azurerm = {
+        source = "hashicorp/azurerm"
+        version = "~> 4.8.0"
+    }
+  }
+  backend "azurerm" {
+    resource_group_name  = "tfstate-day04"  # Can be passed via `-backend-config=`"resource_group_name=<resource group name>"` in the `init` command.
+    storage_account_name = "day0417691"                      # Can be passed via `-backend-config=`"storage_account_name=<storage account name>"` in the `init` command.
+    container_name       = "tfstate"                       # Can be passed via `-backend-config=`"container_name=<container name>"` in the `init` command.
+    key                  = "dev.terraform.tfstate"        # Can be passed via `-backend-config=`"key=<blob key name>"` in the `init` command.
+  }
+  required_version = ">=1.9.0"
+}
 
-on:
-  workflow_dispatch:
-    inputs:
-      action:
-        description: "Choose Terraform action"
-        required: true
-        type: choice
-        options:
-          - plan
-          - apply
-          - destroy
+provider "azurerm" {
+    features {
+      
+    }
+  
+}
 
-permissions:
-  contents: read
+resource "azurerm_resource_group" "example" {
+  name     = "example-resources"
+  location = "West Europe"
+}
 
-concurrency:
-  group: terraform-main4
-  cancel-in-progress: false
+resource "azurerm_storage_account" "example" {
+ 
+  name                     = "tanmayrg"
+  resource_group_name      = azurerm_resource_group.example.name
+  location                 = azurerm_resource_group.example.location # implicit dependency
+  account_tier             = "Standard"
+  account_replication_type = "LRS"
 
-jobs:
-  terraform:
-    name: Terraform ${{ github.event.inputs.action }}
-    runs-on: ubuntu-latest
-
-    # Optional manual approval environments
-    # Create environments in GitHub:
-    # plan
-    # apply
-    # destroy
-    environment: ${{ github.event.inputs.action }}
-
-    env:
-      ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-      ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-    steps:
-
-      #############################################################
-      # CHECKOUT
-      #############################################################
-
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      #############################################################
-      # INSTALL AZURE CLI
-      #############################################################
-
-      - name: Install Azure CLI
-        run: |
-          curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
-
-      #############################################################
-      # SETUP TERRAFORM
-      #############################################################
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v2
-        with:
-          terraform_version: "1.9.7"
-
-      #############################################################
-      # VALIDATE AZURE SECRETS
-      #############################################################
-
-      - name: Validate Azure Secrets
-        shell: bash
-        run: |
-          if [ -z "$ARM_CLIENT_ID" ]; then
-            echo "Missing ARM_CLIENT_ID"
-            exit 1
-          fi
-
-          if [ -z "$ARM_CLIENT_SECRET" ]; then
-            echo "Missing ARM_CLIENT_SECRET"
-            exit 1
-          fi
-
-          if [ -z "$ARM_TENANT_ID" ]; then
-            echo "Missing ARM_TENANT_ID"
-            exit 1
-          fi
-
-          if [ -z "$ARM_SUBSCRIPTION_ID" ]; then
-            echo "Missing ARM_SUBSCRIPTION_ID"
-            exit 1
-          fi
-
-      #############################################################
-      # AZURE LOGIN
-      #############################################################
-
-      - name: Azure Login
-        uses: azure/login@v2
-        with:
-          creds: |
-            {
-              "clientId": "${{ secrets.AZURE_CLIENT_ID }}",
-              "clientSecret": "${{ secrets.AZURE_CLIENT_SECRET }}",
-              "subscriptionId": "${{ secrets.AZURE_SUBSCRIPTION_ID }}",
-              "tenantId": "${{ secrets.AZURE_TENANT_ID }}"
-            }
-
-      #############################################################
-      # BOOTSTRAP TERRAFORM BACKEND
-      #############################################################
-
-      - name: Bootstrap Terraform Backend
-        shell: bash
-        run: |
-
-          RESOURCE_GROUP="tfstate-day04"
-          STORAGE_ACCOUNT="day0417691"
-          CONTAINER="tfstate"
-          LOCATION="westeurope"
-
-          echo "Creating resource group..."
-          az group create \
-            --name $RESOURCE_GROUP \
-            --location $LOCATION
-
-          echo "Creating storage account..."
-          az storage account create \
-            --resource-group $RESOURCE_GROUP \
-            --name $STORAGE_ACCOUNT \
-            --sku Standard_LRS \
-            --kind StorageV2 \
-            --location $LOCATION
-
-          echo "Getting storage account key..."
-          ACCOUNT_KEY=$(az storage account keys list \
-            --resource-group $RESOURCE_GROUP \
-            --account-name $STORAGE_ACCOUNT \
-            --query '[0].value' \
-            -o tsv)
-
-          echo "Creating blob container..."
-          az storage container create \
-            --name $CONTAINER \
-            --account-name $STORAGE_ACCOUNT \
-            --account-key $ACCOUNT_KEY
-
-      #############################################################
-      # TERRAFORM INIT
-      #############################################################
-
-      - name: Terraform Init
-        working-directory: Terraform
-        run: |
-          terraform init -reconfigure \
-            -backend-config="resource_group_name=tfstate-day04" \
-            -backend-config="storage_account_name=day0417691" \
-            -backend-config="container_name=tfstate" \
-            -backend-config="key=terraform.tfstate"
-
-      #############################################################
-      # TERRAFORM FORMAT
-      #############################################################
-
-      - name: Terraform Format
-        working-directory: Terraform
-        run: terraform fmt -recursive
-
-      #############################################################
-      # TERRAFORM VALIDATE
-      #############################################################
-
-      - name: Terraform Validate
-        working-directory: Terraform
-        run: terraform validate
-
-      #############################################################
-      # TERRAFORM PLAN
-      #############################################################
-
-      - name: Terraform Plan
-        if: github.event.inputs.action == 'plan'
-        working-directory: Terraform
-        run: |
-          terraform plan -out=plan.tfplan
-
-      - name: Upload Plan Artifact
-        if: github.event.inputs.action == 'plan'
-        uses: actions/upload-artifact@v4
-        with:
-          name: terraform-plan
-          path: Terraform/plan.tfplan
-
-      #############################################################
-      # TERRAFORM APPLY
-      #############################################################
-
-      - name: Download Plan Artifact
-        if: github.event.inputs.action == 'apply'
-        uses: actions/download-artifact@v4
-        with:
-          name: terraform-plan
-          path: Terraform
-
-      - name: Terraform Apply
-        if: github.event.inputs.action == 'apply'
-        working-directory: Terraform
-        run: |
-          terraform apply -auto-approve plan.tfplan
-
-      #############################################################
-      # TERRAFORM DESTROY
-      #############################################################
-
-      - name: Terraform Destroy
-        if: github.event.inputs.action == 'destroy'
-        working-directory: Terraform
-        run: |
-          terraform destroy -auto-approve
+  tags = {
+    environment = "staging"
+  }
+}
