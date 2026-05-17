@@ -8,106 +8,118 @@ pr:
     include:
       - main
 
-pool:
-  vmImage: 'ubuntu-latest'
-
 variables:
   terraformVersion: '1.7.0'
   tfWorkingDirectory: 'Terraform'
   planFile: '$(Pipeline.Workspace)/terraform.plan'
 
-jobs:
-- job: TerraformPlan
+stages:
+- stage: TerraformPlan
   displayName: 'Terraform Plan'
-  steps:
-  - checkout: self
+  jobs:
+  - job: Plan
+    displayName: 'Run Terraform init/validate/plan'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - checkout: self
 
-  - task: Bash@3
-    displayName: 'Install Terraform'
-    inputs:
-      targetType: 'inline'
-      script: |
-        sudo apt-get update -y
-        sudo apt-get install -y unzip curl
-        curl -fsSL https://releases.hashicorp.com/terraform/$(terraformVersion)/terraform_$(terraformVersion)_linux_amd64.zip -o terraform.zip
-        unzip -o terraform.zip
-        sudo mv terraform /usr/local/bin/
-        terraform version
+    - task: Bash@3
+      displayName: 'Install Terraform'
+      inputs:
+        targetType: 'inline'
+        script: |
+          sudo apt-get update -y
+          sudo apt-get install -y unzip curl
+          curl -fsSL https://releases.hashicorp.com/terraform/$(terraformVersion)/terraform_$(terraformVersion)_linux_amd64.zip -o terraform.zip
+          unzip -o terraform.zip
+          sudo mv terraform /usr/local/bin/
+          terraform version
 
-  - task: Bash@3
-    displayName: 'Terraform init'
-    inputs:
-      targetType: 'inline'
-      script: |
-        cd $(tfWorkingDirectory)
-        terraform init
+    - task: Bash@3
+      displayName: 'Terraform init'
+      inputs:
+        targetType: 'inline'
+        script: |
+          cd $(tfWorkingDirectory)
+          terraform init
 
-  - task: Bash@3
-    displayName: 'Terraform validate'
-    inputs:
-      targetType: 'inline'
-      script: |
-        cd $(tfWorkingDirectory)
-        terraform validate
+    - task: Bash@3
+      displayName: 'Terraform validate'
+      inputs:
+        targetType: 'inline'
+        script: |
+          cd $(tfWorkingDirectory)
+          terraform validate
 
-  - task: Bash@3
-    displayName: 'Terraform plan'
-    inputs:
-      targetType: 'inline'
-      script: |
-        cd $(tfWorkingDirectory)
-        terraform plan -out="$(planFile)"
+    - task: Bash@3
+      displayName: 'Terraform plan'
+      inputs:
+        targetType: 'inline'
+        script: |
+          cd $(tfWorkingDirectory)
+          terraform plan -out="$(planFile)"
 
-- job: TerraformApply
+- stage: TerraformApply
   displayName: 'Terraform Apply'
   dependsOn: TerraformPlan
   condition: succeeded()
-  steps:
-  - checkout: self
+  jobs:
+  - job: Apply
+    displayName: 'Apply Terraform'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - checkout: self
 
-  - task: Bash@3
-    displayName: 'Install Terraform'
-    inputs:
-      targetType: 'inline'
-      script: |
-        sudo apt-get update -y
-        sudo apt-get install -y unzip curl
-        curl -fsSL https://releases.hashicorp.com/terraform/$(terraformVersion)/terraform_$(terraformVersion)_linux_amd64.zip -o terraform.zip
-        unzip -o terraform.zip
-        sudo mv terraform /usr/local/bin/
-        terraform version
+    - task: Bash@3
+      displayName: 'Install Terraform'
+      inputs:
+        targetType: 'inline'
+        script: |
+          sudo apt-get update -y
+          sudo apt-get install -y unzip curl
+          curl -fsSL https://releases.hashicorp.com/terraform/$(terraformVersion)/terraform_$(terraformVersion)_linux_amd64.zip -o terraform.zip
+          unzip -o terraform.zip
+          sudo mv terraform /usr/local/bin/
+          terraform version
 
-  - task: Bash@3
-    displayName: 'Terraform apply'
-    inputs:
-      targetType: 'inline'
-      script: |
-        cd $(tfWorkingDirectory)
-        terraform apply -auto-approve "$(planFile)"
+    - task: Bash@3
+      displayName: 'Terraform apply'
+      inputs:
+        targetType: 'inline'
+        script: |
+          cd $(tfWorkingDirectory)
+          terraform apply -auto-approve "$(planFile)"
 
-- job: TerraformDestroy
+- stage: TerraformDestroy
   displayName: 'Terraform Destroy'
   dependsOn: TerraformApply
   condition: succeeded()
-  steps:
-  - checkout: self
+  jobs:
+  - job: Destroy
+    displayName: 'Destroy Terraform resources'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - checkout: self
 
-  - task: Bash@3
-    displayName: 'Install Terraform'
-    inputs:
-      targetType: 'inline'
-      script: |
-        sudo apt-get update -y
-        sudo apt-get install -y unzip curl
-        curl -fsSL https://releases.hashicorp.com/terraform/$(terraformVersion)/terraform_$(terraformVersion)_linux_amd64.zip -o terraform.zip
-        unzip -o terraform.zip
-        sudo mv terraform /usr/local/bin/
-        terraform version
+    - task: Bash@3
+      displayName: 'Install Terraform'
+      inputs:
+        targetType: 'inline'
+        script: |
+          sudo apt-get update -y
+          sudo apt-get install -y unzip curl
+          curl -fsSL https://releases.hashicorp.com/terraform/$(terraformVersion)/terraform_$(terraformVersion)_linux_amd64.zip -o terraform.zip
+          unzip -o terraform.zip
+          sudo mv terraform /usr/local/bin/
+          terraform version
 
-  - task: Bash@3
-    displayName: 'Terraform destroy'
-    inputs:
-      targetType: 'inline'
-      script: |
-        cd $(tfWorkingDirectory)
-        terraform destroy -auto-approve
+    - task: Bash@3
+      displayName: 'Terraform destroy'
+      inputs:
+        targetType: 'inline'
+        script: |
+          cd $(tfWorkingDirectory)
+          terraform destroy -auto-approve
