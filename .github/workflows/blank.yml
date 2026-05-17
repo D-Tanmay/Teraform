@@ -1,36 +1,109 @@
-# This is a basic workflow to help you get started with Actions
-
 name: CI
 
-# Controls when the workflow will run
 on:
-  # Triggers the workflow on push or pull request events but only for the "main4" branch
   push:
-    branches: [ "main4" ]
+    branches: [ 'main4' ]
   pull_request:
-    branches: [ "main4" ]
-
-  # Allows you to run this workflow manually from the Actions tab
+    branches: [ 'main4' ]
   workflow_dispatch:
+    inputs:
+      run_apply:
+        description: 'Run terraform apply after plan'
+        required: false
+        default: 'false'
+      run_destroy:
+        description: 'Run terraform destroy'
+        required: false
+        default: 'false'
 
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
-  # This workflow contains a single job called "build"
-  build:
-    # The type of runner that the job will run on
+  plan:
+    name: Terraform Plan
     runs-on: ubuntu-latest
-
-    # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v4
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
-      # Runs a single command using the runners shell
-      - name: Run a one-line script
-        run: echo Hello, world!
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: '1.9.7'
 
-      # Runs a set of commands using the runners shell
-      - name: Run a multi-line script
-        run: |
-          echo Add other actions to build,
-          echo test, and deploy your project.
+    - name: Azure login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Terraform init
+      working-directory: Terraform
+      run: terraform init -reconfigure
+
+    - name: Terraform validate
+      working-directory: Terraform
+      run: terraform validate
+
+    - name: Terraform plan
+      working-directory: Terraform
+      run: terraform plan -out=plan.tfplan
+
+    - name: Upload plan artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: terraform-plan
+        path: Terraform/plan.tfplan
+
+  apply:
+    name: Terraform Apply
+    needs: plan
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.run_apply == 'true'
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: '1.9.7'
+
+    - name: Azure login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Download plan artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: terraform-plan
+        path: Terraform
+
+    - name: Terraform apply
+      working-directory: Terraform
+      run: terraform apply -auto-approve plan.tfplan
+
+  destroy:
+    name: Terraform Destroy
+    needs: plan
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.run_destroy == 'true'
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: '1.9.7'
+
+    - name: Azure login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Terraform init
+      working-directory: Terraform
+      run: terraform init -reconfigure
+
+    - name: Terraform destroy
+      working-directory: Terraform
+      run: terraform destroy -auto-approve
