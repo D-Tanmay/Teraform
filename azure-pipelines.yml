@@ -24,11 +24,13 @@ stages:
     steps:
     - checkout: self
 
-    - task: Bash@3
-      displayName: 'Install Terraform'
+    - task: AzureCLI@2
+      displayName: 'Azure login and Terraform plan'
       inputs:
-        targetType: 'inline'
-        script: |
+        azureSubscription: 'Terraform-SP'
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
           sudo apt-get update -y
           sudo apt-get install -y unzip curl
           curl -fsSL https://releases.hashicorp.com/terraform/$(terraformVersion)/terraform_$(terraformVersion)_linux_amd64.zip -o terraform.zip
@@ -36,28 +38,9 @@ stages:
           sudo mv terraform /usr/local/bin/
           terraform version
 
-    - task: Bash@3
-      displayName: 'Terraform init'
-      inputs:
-        targetType: 'inline'
-        script: |
           cd $(tfWorkingDirectory)
           terraform init
-
-    - task: Bash@3
-      displayName: 'Terraform validate'
-      inputs:
-        targetType: 'inline'
-        script: |
-          cd $(tfWorkingDirectory)
           terraform validate
-
-    - task: Bash@3
-      displayName: 'Terraform plan'
-      inputs:
-        targetType: 'inline'
-        script: |
-          cd $(tfWorkingDirectory)
           terraform plan -out="$(planFile)"
 
 - stage: TerraformApply
@@ -72,11 +55,13 @@ stages:
     steps:
     - checkout: self
 
-    - task: Bash@3
-      displayName: 'Install Terraform'
+    - task: AzureCLI@2
+      displayName: 'Azure login and Terraform apply'
       inputs:
-        targetType: 'inline'
-        script: |
+        azureSubscription: 'Terraform-SP'
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
           sudo apt-get update -y
           sudo apt-get install -y unzip curl
           curl -fsSL https://releases.hashicorp.com/terraform/$(terraformVersion)/terraform_$(terraformVersion)_linux_amd64.zip -o terraform.zip
@@ -84,11 +69,6 @@ stages:
           sudo mv terraform /usr/local/bin/
           terraform version
 
-    - task: Bash@3
-      displayName: 'Terraform apply'
-      inputs:
-        targetType: 'inline'
-        script: |
           cd $(tfWorkingDirectory)
           terraform apply -auto-approve "$(planFile)"
 
@@ -104,11 +84,13 @@ stages:
     steps:
     - checkout: self
 
-    - task: Bash@3
-      displayName: 'Install Terraform'
+    - task: AzureCLI@2
+      displayName: 'Azure login and Terraform destroy'
       inputs:
-        targetType: 'inline'
-        script: |
+        azureSubscription: 'Terraform-SP'
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
           sudo apt-get update -y
           sudo apt-get install -y unzip curl
           curl -fsSL https://releases.hashicorp.com/terraform/$(terraformVersion)/terraform_$(terraformVersion)_linux_amd64.zip -o terraform.zip
@@ -116,10 +98,5 @@ stages:
           sudo mv terraform /usr/local/bin/
           terraform version
 
-    - task: Bash@3
-      displayName: 'Terraform destroy'
-      inputs:
-        targetType: 'inline'
-        script: |
           cd $(tfWorkingDirectory)
           terraform destroy -auto-approve
