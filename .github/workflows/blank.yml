@@ -36,6 +36,13 @@ jobs:
         if [ -z "${{ secrets.AZURE_TENANT_ID }}" ]; then echo 'Missing AZURE_TENANT_ID'; exit 1; fi
         if [ -z "${{ secrets.AZURE_SUBSCRIPTION_ID }}" ]; then echo 'Missing AZURE_SUBSCRIPTION_ID'; exit 1; fi
 
+    - name: Debug secret presence
+      run: |
+        echo "Tenant set:       ${{ secrets.AZURE_TENANT_ID != '' }}"
+        echo "Client ID set:    ${{ secrets.AZURE_CLIENT_ID != '' }}"
+        echo "Client Secret set:${{ secrets.AZURE_CLIENT_SECRET != '' }}"
+        echo "Subscription set: ${{ secrets.AZURE_SUBSCRIPTION_ID != '' }}"
+
     - name: Azure login
       shell: bash
       run: |
@@ -86,6 +93,13 @@ jobs:
         if [ -z "${{ secrets.AZURE_TENANT_ID }}" ]; then echo 'Missing AZURE_TENANT_ID'; exit 1; fi
         if [ -z "${{ secrets.AZURE_SUBSCRIPTION_ID }}" ]; then echo 'Missing AZURE_SUBSCRIPTION_ID'; exit 1; fi
 
+    - name: Debug secret presence
+      run: |
+        echo "Tenant set:        ${{ secrets.AZURE_TENANT_ID != '' }}"
+        echo "Client ID set:     ${{ secrets.AZURE_CLIENT_ID != '' }}"
+        echo "Client Secret set: ${{ secrets.AZURE_CLIENT_SECRET != '' }}"
+        echo "Subscription set:  ${{ secrets.AZURE_SUBSCRIPTION_ID != '' }}"
+
     - name: Azure login
       shell: bash
       run: |
@@ -127,6 +141,13 @@ jobs:
         if [ -z "${{ secrets.AZURE_CLIENT_SECRET }}" ]; then echo 'Missing AZURE_CLIENT_SECRET'; exit 1; fi
         if [ -z "${{ secrets.AZURE_TENANT_ID }}" ]; then echo 'Missing AZURE_TENANT_ID'; exit 1; fi
         if [ -z "${{ secrets.AZURE_SUBSCRIPTION_ID }}" ]; then echo 'Missing AZURE_SUBSCRIPTION_ID'; exit 1; fi
+
+    - name: Debug secret presence
+      run: |
+        echo "Tenant set:        ${{ secrets.AZURE_TENANT_ID != '' }}"
+        echo "Client ID set:     ${{ secrets.AZURE_CLIENT_ID != '' }}"
+        echo "Client Secret set: ${{ secrets.AZURE_CLIENT_SECRET != '' }}"
+        echo "Subscription set:  ${{ secrets.AZURE_SUBSCRIPTION_ID != '' }}"
 
     - name: Azure login
       shell: bash
