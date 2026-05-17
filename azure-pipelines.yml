@@ -1,0 +1,100 @@
+trigger:
+  branches:
+    include:
+      - main
+
+pr:
+  branches:
+    include:
+      - main
+
+variables:
+  terraformVersion: '1.7.0'
+  tfWorkingDirectory: 'Terraform'
+  tfPlanFile: '$(System.DefaultWorkingDirectory)/Terraform/terraform.plan'
+
+stages:
+- stage: TerraformPlan
+  displayName: 'Terraform Plan'
+  jobs:
+  - job: Plan
+    displayName: 'Run Terraform init/validate/plan'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - checkout: self
+
+    - task: TerraformCLI@0
+      displayName: 'Terraform init'
+      inputs:
+        provider: 'azurerm'
+        command: 'init'
+        workingDirectory: '$(tfWorkingDirectory)'
+
+    - task: TerraformCLI@0
+      displayName: 'Terraform validate'
+      inputs:
+        provider: 'azurerm'
+        command: 'validate'
+        workingDirectory: '$(tfWorkingDirectory)'
+
+    - task: TerraformCLI@0
+      displayName: 'Terraform plan'
+      inputs:
+        provider: 'azurerm'
+        command: 'plan'
+        workingDirectory: '$(tfWorkingDirectory)'
+        environmentServiceName: 'YOUR-AZURE-SERVICE-CONNECTION'
+        planFilePath: '$(tfPlanFile)'
+
+- stage: TerraformApply
+  displayName: 'Terraform Apply'
+  dependsOn: TerraformPlan
+  condition: succeeded()
+  jobs:
+  - deployment: Apply
+    displayName: 'Apply Terraform'
+    environment: 'dev'
+    pool:
+      vmImage: 'ubuntu-latest'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - checkout: self
+
+          - task: TerraformCLI@0
+            displayName: 'Terraform apply'
+            inputs:
+              provider: 'azurerm'
+              command: 'apply'
+              workingDirectory: '$(tfWorkingDirectory)'
+              environmentServiceName: 'YOUR-AZURE-SERVICE-CONNECTION'
+              planOrConfig: 'plan'
+              planFilePath: '$(tfPlanFile)'
+              autoApprove: true
+
+- stage: TerraformDestroy
+  displayName: 'Terraform Destroy'
+  dependsOn: TerraformApply
+  condition: succeeded()
+  jobs:
+  - deployment: Destroy
+    displayName: 'Destroy Terraform resources'
+    environment: 'dev'
+    pool:
+      vmImage: 'ubuntu-latest'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - checkout: self
+
+          - task: TerraformCLI@0
+            displayName: 'Terraform destroy'
+            inputs:
+              provider: 'azurerm'
+              command: 'destroy'
+              workingDirectory: '$(tfWorkingDirectory)'
+              environmentServiceName: 'YOUR-AZURE-SERVICE-CONNECTION'
+              autoApprove: true
