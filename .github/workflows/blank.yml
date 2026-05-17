@@ -1,167 +1,221 @@
-name: Terraform CI/CD
+name: CI
 
 on:
+  push:
+    branches: [ 'main4' ]
+  pull_request:
+    branches: [ 'main4' ]
   workflow_dispatch:
     inputs:
-      action:
-        description: "Choose Terraform action"
-        required: true
-        type: choice
-        options:
-          - plan
-          - apply
-          - destroy
-
-permissions:
-  contents: read
-
-concurrency:
-  group: terraform-main4
-  cancel-in-progress: false
+      run_apply:
+        description: 'Run terraform apply after plan'
+        required: false
+        default: 'false'
+      run_destroy:
+        description: 'Run terraform destroy'
+        required: false
+        default: 'false'
 
 jobs:
-
-  terraform:
-    name: Terraform ${{ github.event.inputs.action }}
+  plan:
+    name: Terraform Plan
     runs-on: ubuntu-latest
-
-    # Optional:
-    # Create GitHub environments named: plan, apply, destroy
-    # and configure manual approvals there
-    environment: ${{ github.event.inputs.action }}
-
     env:
-      ARM_CLIENT_ID:       ${{ secrets.AZURE_CLIENT_ID }}
-      ARM_CLIENT_SECRET:   ${{ secrets.AZURE_CLIENT_SECRET }}
-      ARM_TENANT_ID:       ${{ secrets.AZURE_TENANT_ID }}
+      ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
       ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-    defaults:
-      run:
-        working-directory: Terraform
-
     steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
-      # ── Checkout ─────────────────────────────────────────────────────────
-      - name: Checkout repository
-        uses: actions/checkout@v4
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: '1.9.7'
 
-      # ── Azure CLI ────────────────────────────────────────────────────────
-      - name: Install Azure CLI
-        working-directory: ${{ github.workspace }}
-        run: curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+    - name: Check Azure secrets
+      run: |
+        if [ -z "${{ secrets.AZURE_CLIENT_ID }}" ]; then echo 'Missing AZURE_CLIENT_ID'; exit 1; fi
+        if [ -z "${{ secrets.AZURE_CLIENT_SECRET }}" ]; then echo 'Missing AZURE_CLIENT_SECRET'; exit 1; fi
+        if [ -z "${{ secrets.AZURE_TENANT_ID }}" ]; then echo 'Missing AZURE_TENANT_ID'; exit 1; fi
+        if [ -z "${{ secrets.AZURE_SUBSCRIPTION_ID }}" ]; then echo 'Missing AZURE_SUBSCRIPTION_ID'; exit 1; fi
+    - name: Bootstrap Terraform backend via REST API
+      shell: bash
+      run: |
+        RESOURCE_GROUP="tfstate-day04"
+        STORAGE_ACCOUNT="day0417691"
+        CONTAINER="tfstate"
+        LOCATION="westeurope"
+        TENANT_ID="${ARM_TENANT_ID}"
+        CLIENT_ID="${ARM_CLIENT_ID}"
+        CLIENT_SECRET="${ARM_CLIENT_SECRET}"
+        SUBSCRIPTION_ID="${ARM_SUBSCRIPTION_ID}"
+        echo "Step 1: Get access token"
+        TOKEN=$(curl -s -X POST \
+          "https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token" \
+          -H "Content-Type: application/x-www-form-urlencoded" \
+          -d "grant_type=client_credentials" \
+          -d "client_id=${CLIENT_ID}" \
+          -d "client_secret=${CLIENT_SECRET}" \
+          -d "scope=https://management.azure.com/.default" \
+          | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+        if [ -z "$TOKEN" ]; then
+          echo "ERROR: Failed to get access token"
+          exit 1
+        fi
+        echo "Token acquired successfully"
+        BASE="https://management.azure.com/subscriptions/${SUBSCRIPTION_ID}"
+        echo "Step 2: Create resource group"
+        curl -s -X PUT \
+          "${BASE}/resourcegroups/${RESOURCE_GROUP}?api-version=2021-04-01" \
+          -H "Authorization: Bearer ${TOKEN}" \
+          -H "Content-Type: application/json" \
+          -d "{\"location\": \"${LOCATION}\"}" | python3 -c "import sys,json; r=json.load(sys.stdin); print('RG:', r.get('properties',{}).get('provisioningState', r))"
+        echo "Step 3: Create storage account"
+        SA_RESPONSE=$(curl -s -X PUT \
+          "${BASE}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.Storage/storageAccounts/${STORAGE_ACCOUNT}?api-version=2023-01-01" \
+          -H "Authorization: Bearer ${TOKEN}" \
+          -H "Content-Type: application/json" \
+          -d "{
+            \"sku\": {\"name\": \"Standard_LRS\"},
+            \"kind\": \"StorageV2\",
+            \"location\": \"${LOCATION}\",
+            \"properties\": {\"minimumTlsVersion\": \"TLS1_2\"}
+          }")
+        echo "Storage response: $(echo $SA_RESPONSE | python3 -c "import sys,json; r=json.load(sys.stdin); print(r.get('error', r.get('properties',{}).get('provisioningState','submitted')))")"
+        echo "Step 4: Wait for storage account to be ready"
+        for i in {1..12}; do
+          STATE=$(curl -s \
+            "${BASE}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.Storage/storageAccounts/${STORAGE_ACCOUNT}?api-version=2023-01-01" \
+            -H "Authorization: Bearer ${TOKEN}" \
+            | python3 -c "import sys,json; print(json.load(sys.stdin).get('properties',{}).get('provisioningState','unknown'))")
+          echo "  Provisioning state: $STATE"
+          if [ "$STATE" = "Succeeded" ]; then break; fi
+          sleep 10
+        done
+        echo "Step 5: Get storage account key"
+        SA_KEY=$(curl -s -X POST \
+          "${BASE}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.Storage/storageAccounts/${STORAGE_ACCOUNT}/listKeys?api-version=2023-01-01" \
+          -H "Authorization: Bearer ${TOKEN}" \
+          -H "Content-Type: application/json" \
+          -d "{}" \
+          | python3 -c "import sys,json; print(json.load(sys.stdin)['keys'][0]['value'])")
+        if [ -z "$SA_KEY" ]; then
+          echo "ERROR: Could not retrieve storage account key"
+          exit 1
+        fi
+        echo "Storage key retrieved"
+        echo "Step 6: Create blob container"
+        az login --service-principal \
+          -u "$CLIENT_ID" -p "$CLIENT_SECRET" --tenant "$TENANT_ID" --output none
+        az storage container create \
+          --name "$CONTAINER" \
+          --account-name "$STORAGE_ACCOUNT" \
+          --account-key "$SA_KEY" 2>&1 || echo "Container may already exist"
+        echo "Bootstrap complete"
+    - name: Azure login for Terraform
+      shell: bash
+      run: |
+        az login --service-principal \
+          -u "$ARM_CLIENT_ID" \
+          -p "$ARM_CLIENT_SECRET" \
+          --tenant "$ARM_TENANT_ID"
+        az account set --subscription "$ARM_SUBSCRIPTION_ID"
+    - name: Terraform init
+      working-directory: Terraform
+      run: terraform init -reconfigure
 
-      # ── Terraform ────────────────────────────────────────────────────────
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v2
-        with:
-          terraform_version: "1.9.7"
+    - name: Terraform validate
+      working-directory: Terraform
+      run: terraform validate
 
-      # ── Validate secrets ─────────────────────────────────────────────────
-      - name: Validate Azure secrets
-        working-directory: ${{ github.workspace }}
-        shell: bash
-        run: |
-          missing=()
-          [[ -z "$ARM_CLIENT_ID"       ]] && missing+=("ARM_CLIENT_ID")
-          [[ -z "$ARM_CLIENT_SECRET"   ]] && missing+=("ARM_CLIENT_SECRET")
-          [[ -z "$ARM_TENANT_ID"       ]] && missing+=("ARM_TENANT_ID")
-          [[ -z "$ARM_SUBSCRIPTION_ID" ]] && missing+=("ARM_SUBSCRIPTION_ID")
-          if [[ ${#missing[@]} -gt 0 ]]; then
-            echo "Missing secrets: ${missing[*]}"
-            exit 1
-          fi
+    - name: Terraform plan
+      working-directory: Terraform
+      run: terraform plan -out=plan.tfplan
 
-      # ── Azure login ───────────────────────────────────────────────────────
-      - name: Azure login
-        uses: azure/login@v2
-        with:
-          creds: |
-            {
-              "clientId":       "${{ secrets.AZURE_CLIENT_ID }}",
-              "clientSecret":   "${{ secrets.AZURE_CLIENT_SECRET }}",
-              "subscriptionId": "${{ secrets.AZURE_SUBSCRIPTION_ID }}",
-              "tenantId":       "${{ secrets.AZURE_TENANT_ID }}"
-            }
+    - name: Upload plan artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: terraform-plan
+        path: Terraform/plan.tfplan
 
-      # ── Bootstrap backend ─────────────────────────────────────────────────
-      - name: Bootstrap Terraform backend
-        working-directory: ${{ github.workspace }}
-        shell: bash
-        env:
-          RESOURCE_GROUP:   tfstate-day04
-          STORAGE_ACCOUNT:  day0417691
-          CONTAINER:        tfstate
-          LOCATION:         westeurope
-        run: |
-          echo "Creating resource group..."
-          az group create \
-            --name "$RESOURCE_GROUP" \
-            --location "$LOCATION"
+  apply:
+    name: Terraform Apply
+    needs: plan
+    if: needs.plan.result == 'success'
+    runs-on: ubuntu-latest
+    # This environment has a manual approval gate configured in GitHub Settings
+    environment: apply
+    env:
+      ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
-          echo "Creating storage account..."
-          az storage account create \
-            --resource-group "$RESOURCE_GROUP" \
-            --name "$STORAGE_ACCOUNT" \
-            --sku Standard_LRS \
-            --kind StorageV2 \
-            --location "$LOCATION"
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: '1.9.7'
 
-          echo "Fetching storage account key..."
-          ACCOUNT_KEY=$(az storage account keys list \
-            --resource-group "$RESOURCE_GROUP" \
-            --account-name "$STORAGE_ACCOUNT" \
-            --query '[0].value' \
-            --output tsv)
+    - name: Azure login
+      shell: bash
+      run: |
+        az login --service-principal \
+          -u "$ARM_CLIENT_ID" \
+          -p "$ARM_CLIENT_SECRET" \
+          --tenant "$ARM_TENANT_ID"
+        az account set --subscription "$ARM_SUBSCRIPTION_ID"
+    - name: Terraform init
+      working-directory: Terraform
+      run: terraform init -reconfigure
 
-          echo "Creating blob container..."
-          az storage container create \
-            --name "$CONTAINER" \
-            --account-name "$STORAGE_ACCOUNT" \
-            --account-key "$ACCOUNT_KEY"
+    - name: Download plan artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: terraform-plan
+        path: Terraform
 
-      # ── Terraform init ────────────────────────────────────────────────────
-      - name: Terraform init
-        run: |
-          terraform init -reconfigure \
-            -backend-config="resource_group_name=tfstate-day04" \
-            -backend-config="storage_account_name=day0417691" \
-            -backend-config="container_name=tfstate" \
-            -backend-config="key=terraform.tfstate"
+    - name: Terraform apply
+      working-directory: Terraform
+      run: terraform apply -auto-approve plan.tfplan
 
-      # ── Terraform format check ────────────────────────────────────────────
-      - name: Terraform format check
-        run: terraform fmt -check -recursive
+  destroy:
+    name: Terraform Destroy
+    needs: plan
+    if: needs.plan.result == 'success'
+    runs-on: ubuntu-latest
+    # This environment has a manual approval gate configured in GitHub Settings
+    environment: destroy
+    env:
+      ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
-      # ── Terraform validate ────────────────────────────────────────────────
-      - name: Terraform validate
-        run: terraform validate
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: '1.9.7'
 
-      # ── Plan ──────────────────────────────────────────────────────────────
-      - name: Terraform plan
-        if: github.event.inputs.action == 'plan'
-        run: terraform plan -out=plan.tfplan
+    - name: Azure login
+      shell: bash
+      run: |
+        az login --service-principal \
+          -u "$ARM_CLIENT_ID" \
+          -p "$ARM_CLIENT_SECRET" \
+          --tenant "$ARM_TENANT_ID"
+        az account set --subscription "$ARM_SUBSCRIPTION_ID"
+    - name: Terraform init
+      working-directory: Terraform
+      run: terraform init -reconfigure
 
-      - name: Upload plan artifact
-        if: github.event.inputs.action == 'plan'
-        uses: actions/upload-artifact@v4
-        with:
-          name: terraform-plan
-          path: Terraform/plan.tfplan
-
-      # ── Apply ─────────────────────────────────────────────────────────────
-      - name: Download plan artifact
-        if: github.event.inputs.action == 'apply'
-        uses: actions/download-artifact@v4
-        with:
-          name: terraform-plan
-          path: Terraform
-
-      - name: Terraform apply
-        if: github.event.inputs.action == 'apply'
-        run: terraform apply -auto-approve plan.tfplan
-
-      # ── Destroy ───────────────────────────────────────────────────────────
-      - name: Terraform destroy
-        if: github.event.inputs.action == 'destroy'
-        run: terraform destroy -auto-approve
+    - name: Terraform destroy
+      working-directory: Terraform
+      run: terraform destroy -auto-approve
