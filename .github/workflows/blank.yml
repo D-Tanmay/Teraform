@@ -12,7 +12,6 @@ on:
           - apply
           - destroy
 
-# Need write permission so the workflow can commit fmt fixes back to the branch
 permissions:
   contents: write
 
@@ -41,11 +40,45 @@ jobs:
     steps:
 
       # ── Checkout ──────────────────────────────────────────────────────────
-      # fetch-depth: 0 needed so we can push commits back
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      # ── GUARDRAIL: Ensure .gitignore excludes .terraform/ ─────────────────
+      # The `terraform init` step downloads provider binaries (100MB+) into
+      # .terraform/. If these are not gitignored, the auto-fmt commit will
+      # try to push them and hit GitHub's 100MB file size limit.
+      - name: Ensure Terraform/.gitignore excludes provider cache
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: |
+          GITIGNORE="Terraform/.gitignore"
+
+          # Create .gitignore if it doesn't exist
+          touch "$GITIGNORE"
+
+          # Append any missing entries
+          entries=(
+            ".terraform/"
+            ".terraform.lock.hcl"
+            "*.tfplan"
+            "*.tfstate"
+            "*.tfstate.backup"
+            "crash.log"
+            "override.tf"
+            "override.tf.json"
+          )
+
+          for entry in "${entries[@]}"; do
+            if ! grep -qxF "$entry" "$GITIGNORE"; then
+              echo "$entry" >> "$GITIGNORE"
+              echo "Added to .gitignore: $entry"
+            fi
+          done
+
+          echo "OK: .gitignore is up to date."
+          cat "$GITIGNORE"
 
       # ── GUARDRAIL: No stray non-Terraform files in Terraform/ ─────────────
       - name: Check Terraform directory contains only .tf files
@@ -55,7 +88,8 @@ jobs:
           bad_files=$(find Terraform/ -maxdepth 1 -type f \
             ! -name "*.tf" \
             ! -name "*.tfvars" \
-            ! -name "*.terraform.lock.hcl")
+            ! -name "*.terraform.lock.hcl" \
+            ! -name ".gitignore")
 
           if [[ -n "$bad_files" ]]; then
             echo "ERROR: Non-Terraform files found inside Terraform/:"
@@ -149,29 +183,26 @@ jobs:
             -backend-config="key=terraform.tfstate"
 
       # ── Terraform format (auto-fix + commit back) ─────────────────────────
-      # Instead of `fmt -check` (which just fails), we run `fmt` to fix issues
-      # in place, then commit and push the changes back to the branch.
-      # If everything was already formatted, nothing is committed.
       - name: Terraform format (auto-fix)
         shell: bash
         run: |
           terraform fmt -recursive
 
-          # Check if fmt changed anything
-          if [[ -n "$(git status --porcelain)" ]]; then
-            echo "Formatting issues were found and auto-fixed."
-            echo "The following files were reformatted:"
-            git diff --name-only
+          # Stage ONLY .tf files — never touch .terraform/ provider cache
+          # or any other files that may have appeared during init
+          git add -- '*.tf'
+
+          if git diff --cached --quiet; then
+            echo "OK: All Terraform files are properly formatted. Nothing to commit."
+          else
+            echo "Formatting issues were found and auto-fixed:"
+            git diff --cached --name-only
 
             git config user.name  "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add -A
             git commit -m "style: auto-format Terraform files [skip ci]"
             git push
-            echo ""
-            echo "Fixes committed. Continuing pipeline with formatted code."
-          else
-            echo "OK: All Terraform files are properly formatted."
+            echo "Fixes committed and pushed."
           fi
 
       # ── Terraform validate ────────────────────────────────────────────────
