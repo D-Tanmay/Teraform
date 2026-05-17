@@ -27,7 +27,7 @@ stages:
     - task: AzureCLI@2
       displayName: 'Azure login and Terraform plan'
       inputs:
-        azureSubscription: 'Terraform-SP'
+        azureSubscription: 'Terraform-SP2'
         scriptType: bash
         scriptLocation: inlineScript
         inlineScript: |
@@ -58,7 +58,7 @@ stages:
     - task: AzureCLI@2
       displayName: 'Azure login and Terraform apply'
       inputs:
-        azureSubscription: 'Terraform-SP'
+        azureSubscription: 'Terraform-SP2'
         scriptType: bash
         scriptLocation: inlineScript
         inlineScript: |
@@ -87,7 +87,7 @@ stages:
     - task: AzureCLI@2
       displayName: 'Azure login and Terraform destroy'
       inputs:
-        azureSubscription: 'Terraform-SP'
+        azureSubscription: 'Terraform-SP2'
         scriptType: bash
         scriptLocation: inlineScript
         inlineScript: |
