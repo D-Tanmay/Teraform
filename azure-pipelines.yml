@@ -1,12 +1,12 @@
 trigger:
   branches:
     include:
-      - main
+      - main4
 
 pr:
   branches:
     include:
-      - main
+      - main4
 
 variables:
   terraformVersion: '1.7.0'
