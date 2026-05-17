@@ -156,11 +156,10 @@ jobs:
   apply:
     name: Terraform Apply
     needs: plan
-    # Runs automatically on push to main4, or manually when run_apply=true
-    if: |
-      (github.ref == 'refs/heads/main4' && github.event_name == 'push') ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.run_apply == 'true')
+    if: needs.plan.result == 'success'
     runs-on: ubuntu-latest
+    # This environment has a manual approval gate configured in GitHub Settings
+    environment: apply
     env:
       ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
@@ -201,8 +200,10 @@ jobs:
   destroy:
     name: Terraform Destroy
     needs: plan
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.run_destroy == 'true'
+    if: needs.plan.result == 'success'
     runs-on: ubuntu-latest
+    # This environment has a manual approval gate configured in GitHub Settings
+    environment: destroy
     env:
       ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
