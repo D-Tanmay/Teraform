@@ -28,7 +28,7 @@ resource "azurerm_resource_group" "example" {
 
 resource "azurerm_storage_account" "example" {
  
-  name                     = "techtutorial101"
+  name                     = "Tanmay_RG"
   resource_group_name      = azurerm_resource_group.example.name
   location                 = azurerm_resource_group.example.location # implicit dependency
   account_tier             = "Standard"
