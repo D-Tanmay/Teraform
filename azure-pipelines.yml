@@ -9,7 +9,7 @@ pr:
       - main4
 
 variables:
-  terraformVersion: '1.9.9'
+  terraformVersion: '1.9.7'
   tfWorkingDirectory: 'Terraform'
   planFile: '$(Pipeline.Workspace)/terraform.plan'
 
