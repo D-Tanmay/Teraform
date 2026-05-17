@@ -4,19 +4,9 @@ name: Terraform CI/CD
 # HOW TO USE
 # ─────────────────────────────────────────────────────────────────────────────
 #
-#  Step 1 — Run the "List Terraform Files" workflow first (or check your repo)
-#           to see which .tf files are available in the Terraform/ directory.
-#
-#  Step 2 — Go to Actions → Terraform CI/CD → Run workflow
-#           tf_file  : type the filename e.g.  main.tf  or  network.tf
+#  Step 1 — Go to Actions → Terraform CI/CD → Run workflow
+#           tf_file  : type the filename e.g.  vm.tf  or  network.tf
 #           action   : pick  plan / apply / destroy
-#
-#  How per-file isolation works:
-#    Terraform normally processes ALL .tf files in a directory together.
-#    This workflow copies ONLY the chosen .tf file (+ any .tfvars) into a
-#    clean temp workspace so Terraform only sees that one file.
-#    This means each file must be self-contained (provider + backend blocks
-#    or those must live in a shared_config.tf that is always included).
 #
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -26,7 +16,7 @@ on:
 
       tf_file:
         description: >
-          Terraform file to target — filename only, e.g. main.tf or network.tf
+          Terraform file to target — filename only, e.g. vm.tf or network.tf
           (must exist inside the Terraform/ directory)
         required: true
         type: string
@@ -44,14 +34,13 @@ permissions:
   contents: write
 
 concurrency:
-  # One run per file at a time — prevents state corruption
   group: terraform-${{ github.event.inputs.tf_file }}
   cancel-in-progress: false
 
 jobs:
 
   # ───────────────────────────────────────────────────────────────────────────
-  # JOB 1 — List available .tf files (shown in the summary for reference)
+  # JOB 1 — List available .tf files (shown in the run summary for reference)
   # ───────────────────────────────────────────────────────────────────────────
   list-tf-files:
     name: Available Terraform files
@@ -101,8 +90,11 @@ jobs:
       ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       TF_FILE:             ${{ github.event.inputs.tf_file }}
       ACTION:              ${{ github.event.inputs.action }}
-      # Isolated workspace — only the chosen .tf file lives here
-      TF_WORKSPACE:        /home/runner/tf-workspace
+      # ⚠️  Do NOT use TF_WORKSPACE — it is a reserved Terraform env var that
+      #     sets the workspace name. Invalid names (e.g. containing hyphens)
+      #     cause "Invalid workspace name" errors during terraform init.
+      #     Use a custom name like WS_DIR instead.
+      WS_DIR: /home/runner/isolated-tf
 
     steps:
 
@@ -116,33 +108,28 @@ jobs:
       - name: Validate selected file
         shell: bash
         run: |
-          # Must end in .tf
           if [[ "$TF_FILE" != *.tf ]]; then
             echo "ERROR: '$TF_FILE' does not end in .tf"
-            echo "Enter a filename like: main.tf  network.tf  storage.tf"
+            echo "Enter a filename like: vm.tf  network.tf  storage.tf"
             exit 1
           fi
 
-          # No path traversal
           if [[ "$TF_FILE" == */* ]] || [[ "$TF_FILE" == *..* ]]; then
             echo "ERROR: Filename must not contain slashes or '..'"
             exit 1
           fi
 
-          TARGET="Terraform/$TF_FILE"
-
-          # File must exist
-          if [[ ! -f "$TARGET" ]]; then
-            echo "ERROR: '$TARGET' not found."
+          if [[ ! -f "Terraform/$TF_FILE" ]]; then
+            echo "ERROR: 'Terraform/$TF_FILE' not found."
             echo ""
             echo "Available .tf files:"
             find Terraform/ -maxdepth 1 -name "*.tf" | sort | sed 's|Terraform/||'
             exit 1
           fi
 
-          echo "OK: '$TARGET' found."
+          echo "OK: 'Terraform/$TF_FILE' found."
 
-      # ── Ensure .gitignore is correct ─────────────────────────────────────
+      # ── Ensure .gitignore excludes provider cache ────────────────────────
       - name: Ensure Terraform/.gitignore excludes provider cache
         shell: bash
         run: |
@@ -169,39 +156,35 @@ jobs:
 
       # ── Build isolated workspace ─────────────────────────────────────────
       # Terraform processes ALL .tf files in a directory together by default.
-      # To run against ONE file only, we create a clean temp directory and
-      # copy in just:
-      #   1. The chosen .tf file
-      #   2. Any shared_*.tf files (provider, backend, variables shared across files)
-      #   3. Any .tfvars files
-      - name: Build isolated Terraform workspace
+      # To target one file only, copy just that file (+ shared configs) into
+      # a clean temp directory so Terraform only sees what we want.
+      - name: Build isolated workspace
         shell: bash
         run: |
-          mkdir -p "$TF_WORKSPACE"
+          mkdir -p "$WS_DIR"
 
           echo "Copying selected file: Terraform/$TF_FILE"
-          cp "Terraform/$TF_FILE" "$TF_WORKSPACE/"
+          cp "Terraform/$TF_FILE" "$WS_DIR/"
 
-          # Copy shared config files if they exist (provider.tf, versions.tf, etc.)
-          # These are files that every .tf file depends on
-          for shared in Terraform/provider.tf Terraform/versions.tf Terraform/variables.tf; do
-            if [[ -f "$shared" ]] && [[ "$(basename $shared)" != "$TF_FILE" ]]; then
+          # Copy shared config files that every .tf file depends on
+          for shared in provider.tf versions.tf variables.tf; do
+            if [[ -f "Terraform/$shared" ]] && [[ "$shared" != "$TF_FILE" ]]; then
               echo "Copying shared config: $shared"
-              cp "$shared" "$TF_WORKSPACE/"
+              cp "Terraform/$shared" "$WS_DIR/"
             fi
           done
 
           # Copy .tfvars if present
           for tfvars in Terraform/*.tfvars Terraform/*.tfvars.json; do
             if [[ -f "$tfvars" ]]; then
-              echo "Copying tfvars: $tfvars"
-              cp "$tfvars" "$TF_WORKSPACE/"
+              echo "Copying tfvars: $(basename $tfvars)"
+              cp "$tfvars" "$WS_DIR/"
             fi
           done
 
           echo ""
-          echo "Workspace contents:"
-          ls -lh "$TF_WORKSPACE/"
+          echo "Isolated workspace contents:"
+          ls -lh "$WS_DIR/"
 
       # ── Azure CLI ────────────────────────────────────────────────────────
       - name: Install Azure CLI
@@ -270,10 +253,12 @@ jobs:
             --account-key "$ACCOUNT_KEY"
 
       # ── Terraform init ────────────────────────────────────────────────────
-      # Use the file stem as the state key so each .tf file gets its OWN
-      # state file — e.g. main.tf → main.tfstate, network.tf → network.tfstate
+      # Each .tf file gets its own state key:
+      #   vm.tf      → vm.tfstate
+      #   network.tf → network.tfstate
       - name: Terraform init
-        working-directory: ${{ env.TF_WORKSPACE }}
+        working-directory: ${{ env.WS_DIR }}
+        shell: bash
         run: |
           STATE_KEY="${TF_FILE%.tf}.tfstate"
           echo "Using state key: $STATE_KEY"
@@ -286,12 +271,11 @@ jobs:
 
       # ── Terraform format (auto-fix + commit) ──────────────────────────────
       - name: Terraform format (auto-fix)
-        working-directory: ${{ env.TF_WORKSPACE }}
+        working-directory: ${{ env.WS_DIR }}
         shell: bash
         run: |
           terraform fmt -recursive
 
-          # Stage ONLY .tf files back in the original repo dir — never .terraform/
           cd "$GITHUB_WORKSPACE"
           git add -- "Terraform/$TF_FILE"
 
@@ -307,22 +291,21 @@ jobs:
 
       # ── Terraform validate ────────────────────────────────────────────────
       - name: Terraform validate
-        working-directory: ${{ env.TF_WORKSPACE }}
+        working-directory: ${{ env.WS_DIR }}
         run: terraform validate
 
       # ── Plan ──────────────────────────────────────────────────────────────
       - name: Terraform plan
         if: env.ACTION == 'plan'
-        working-directory: ${{ env.TF_WORKSPACE }}
+        working-directory: ${{ env.WS_DIR }}
         run: terraform plan -out=plan.tfplan
 
       - name: Upload plan artifact
         if: env.ACTION == 'plan'
         uses: actions/upload-artifact@v4
         with:
-          # Artifact name includes the file so plans don't overwrite each other
           name: terraform-plan-${{ github.event.inputs.tf_file }}
-          path: ${{ env.TF_WORKSPACE }}/plan.tfplan
+          path: ${{ env.WS_DIR }}/plan.tfplan
 
       # ── Apply ─────────────────────────────────────────────────────────────
       - name: Download plan artifact
@@ -330,17 +313,17 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: terraform-plan-${{ github.event.inputs.tf_file }}
-          path: ${{ env.TF_WORKSPACE }}
+          path: ${{ env.WS_DIR }}
 
       - name: Terraform apply
         if: env.ACTION == 'apply'
-        working-directory: ${{ env.TF_WORKSPACE }}
+        working-directory: ${{ env.WS_DIR }}
         run: terraform apply -auto-approve plan.tfplan
 
       # ── Destroy ───────────────────────────────────────────────────────────
       - name: Terraform destroy
         if: env.ACTION == 'destroy'
-        working-directory: ${{ env.TF_WORKSPACE }}
+        working-directory: ${{ env.WS_DIR }}
         run: terraform destroy -auto-approve
 
       # ── Summary ───────────────────────────────────────────────────────────
