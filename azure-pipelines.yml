@@ -1,0 +1,101 @@
+trigger:
+  branches:
+    include:
+      - main
+
+pr:
+  branches:
+    include:
+      - main
+
+variables:
+  terraformVersion: '1.7.0'
+  tfWorkingDirectory: 'Terraform'
+  planFile: '$(Build.SourcesDirectory)/Terraform/terraform.plan'
+
+stages:
+- stage: TerraformPlan
+  displayName: 'Terraform Plan'
+  jobs:
+  - job: Plan
+    displayName: 'Run Terraform init/validate/plan'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - checkout: self
+
+    - script: |
+        sudo apt-get update -y
+        sudo apt-get install -y unzip curl
+        curl -fsSL https://releases.hashicorp.com/terraform/$(terraformVersion)/terraform_$(terraformVersion)_linux_amd64.zip -o terraform.zip
+        unzip -o terraform.zip
+        sudo mv terraform /usr/local/bin/
+        terraform version
+      displayName: 'Install Terraform'
+
+    - script: |
+        cd $(tfWorkingDirectory)
+        terraform init
+      displayName: 'Terraform init'
+
+    - script: |
+        cd $(tfWorkingDirectory)
+        terraform validate
+      displayName: 'Terraform validate'
+
+    - script: |
+        cd $(tfWorkingDirectory)
+        terraform plan -out="$(planFile)"
+      displayName: 'Terraform plan'
+
+- stage: TerraformApply
+  displayName: 'Terraform Apply'
+  dependsOn: TerraformPlan
+  condition: succeeded()
+  jobs:
+  - job: Apply
+    displayName: 'Apply Terraform plan'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - checkout: self
+
+    - script: |
+        sudo apt-get update -y
+        sudo apt-get install -y unzip curl
+        curl -fsSL https://releases.hashicorp.com/terraform/$(terraformVersion)/terraform_$(terraformVersion)_linux_amd64.zip -o terraform.zip
+        unzip -o terraform.zip
+        sudo mv terraform /usr/local/bin/
+        terraform version
+      displayName: 'Install Terraform'
+
+    - script: |
+        cd $(tfWorkingDirectory)
+        terraform apply -auto-approve "$(planFile)"
+      displayName: 'Terraform apply'
+
+- stage: TerraformDestroy
+  displayName: 'Terraform Destroy'
+  dependsOn: TerraformApply
+  condition: succeeded()
+  jobs:
+  - job: Destroy
+    displayName: 'Destroy Terraform resources'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - checkout: self
+
+    - script: |
+        sudo apt-get update -y
+        sudo apt-get install -y unzip curl
+        curl -fsSL https://releases.hashicorp.com/terraform/$(terraformVersion)/terraform_$(terraformVersion)_linux_amd64.zip -o terraform.zip
+        unzip -o terraform.zip
+        sudo mv terraform /usr/local/bin/
+        terraform version
+      displayName: 'Install Terraform'
+
+    - script: |
+        cd $(tfWorkingDirectory)
+        terraform destroy -auto-approve
+      displayName: 'Terraform destroy'
