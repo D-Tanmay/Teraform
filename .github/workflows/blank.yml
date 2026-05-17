@@ -57,6 +57,23 @@ jobs:
           --tenant "$ARM_TENANT_ID"
         az account set --subscription "$ARM_SUBSCRIPTION_ID"
 
+    - name: Diagnose subscription access
+      shell: bash
+      run: |
+        echo "=== Active account ==="
+        az account show
+
+        echo ""
+        echo "=== All accessible subscriptions ==="
+        az account list --output table
+
+        echo ""
+        echo "=== Subscription ID length check ==="
+        echo "Length: ${#ARM_SUBSCRIPTION_ID}"
+        # Print first/last 4 chars to detect formatting issues without exposing the full value
+        echo "Starts with: ${ARM_SUBSCRIPTION_ID:0:4}"
+        echo "Ends with:   ${ARM_SUBSCRIPTION_ID: -4}"
+
     - name: Bootstrap Terraform backend
       shell: bash
       run: |
@@ -64,20 +81,10 @@ jobs:
         STORAGE_ACCOUNT="day0417691"
         CONTAINER="tfstate"
         LOCATION="westeurope"
-        SUBSCRIPTION="$ARM_SUBSCRIPTION_ID"
 
-        echo "Using Subscription: $SUBSCRIPTION"
-
-        # Create resource group if it doesn't exist
-        if ! az group show --name "$RESOURCE_GROUP" --subscription "$SUBSCRIPTION" &>/dev/null; then
-          echo "Creating resource group: $RESOURCE_GROUP"
-          az group create \
-            --name "$RESOURCE_GROUP" \
-            --location "$LOCATION" \
-            --subscription "$SUBSCRIPTION"
-        else
-          echo "Resource group already exists: $RESOURCE_GROUP"
-        fi
+        # Use the subscription from the active az login context instead of env var
+        SUBSCRIPTION=$(az account show --query id -o tsv)
+        echo "Resolved Subscription ID: $SUBSCRIPTION"
 
         # Create storage account if it doesn't exist
         if ! az storage account show \
@@ -178,11 +185,8 @@ jobs:
         STORAGE_ACCOUNT="day0417691"
         CONTAINER="tfstate"
         LOCATION="westeurope"
-        SUBSCRIPTION="$ARM_SUBSCRIPTION_ID"
+        SUBSCRIPTION=$(az account show --query id -o tsv)
 
-        if ! az group show --name "$RESOURCE_GROUP" --subscription "$SUBSCRIPTION" &>/dev/null; then
-          az group create --name "$RESOURCE_GROUP" --location "$LOCATION" --subscription "$SUBSCRIPTION"
-        fi
         if ! az storage account show --name "$STORAGE_ACCOUNT" --resource-group "$RESOURCE_GROUP" --subscription "$SUBSCRIPTION" &>/dev/null; then
           az storage account create \
             --name "$STORAGE_ACCOUNT" \
@@ -263,11 +267,8 @@ jobs:
         STORAGE_ACCOUNT="day0417691"
         CONTAINER="tfstate"
         LOCATION="westeurope"
-        SUBSCRIPTION="$ARM_SUBSCRIPTION_ID"
+        SUBSCRIPTION=$(az account show --query id -o tsv)
 
-        if ! az group show --name "$RESOURCE_GROUP" --subscription "$SUBSCRIPTION" &>/dev/null; then
-          az group create --name "$RESOURCE_GROUP" --location "$LOCATION" --subscription "$SUBSCRIPTION"
-        fi
         if ! az storage account show --name "$STORAGE_ACCOUNT" --resource-group "$RESOURCE_GROUP" --subscription "$SUBSCRIPTION" &>/dev/null; then
           az storage account create \
             --name "$STORAGE_ACCOUNT" \
