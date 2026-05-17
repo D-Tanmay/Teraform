@@ -24,29 +24,41 @@ stages:
     steps:
     - checkout: self
 
-    - script: |
-        sudo apt-get update -y
-        sudo apt-get install -y unzip curl
-        curl -fsSL https://releases.hashicorp.com/terraform/$(terraformVersion)/terraform_$(terraformVersion)_linux_amd64.zip -o terraform.zip
-        unzip -o terraform.zip
-        sudo mv terraform /usr/local/bin/
-        terraform version
+    - task: Bash@3
       displayName: 'Install Terraform'
+      inputs:
+        targetType: 'inline'
+        script: |
+          sudo apt-get update -y
+          sudo apt-get install -y unzip curl
+          curl -fsSL https://releases.hashicorp.com/terraform/$(terraformVersion)/terraform_$(terraformVersion)_linux_amd64.zip -o terraform.zip
+          unzip -o terraform.zip
+          sudo mv terraform /usr/local/bin/
+          terraform version
 
-    - script: |
-        cd $(tfWorkingDirectory)
-        terraform init
+    - task: Bash@3
       displayName: 'Terraform init'
+      inputs:
+        targetType: 'inline'
+        script: |
+          cd $(tfWorkingDirectory)
+          terraform init
 
-    - script: |
-        cd $(tfWorkingDirectory)
-        terraform validate
+    - task: Bash@3
       displayName: 'Terraform validate'
+      inputs:
+        targetType: 'inline'
+        script: |
+          cd $(tfWorkingDirectory)
+          terraform validate
 
-    - script: |
-        cd $(tfWorkingDirectory)
-        terraform plan -out="$(planFile)"
+    - task: Bash@3
       displayName: 'Terraform plan'
+      inputs:
+        targetType: 'inline'
+        script: |
+          cd $(tfWorkingDirectory)
+          terraform plan -out="$(planFile)"
 
 - stage: TerraformApply
   displayName: 'Terraform Apply'
@@ -54,25 +66,31 @@ stages:
   condition: succeeded()
   jobs:
   - job: Apply
-    displayName: 'Apply Terraform plan'
+    displayName: 'Apply Terraform'
     pool:
       vmImage: 'ubuntu-latest'
     steps:
     - checkout: self
 
-    - script: |
-        sudo apt-get update -y
-        sudo apt-get install -y unzip curl
-        curl -fsSL https://releases.hashicorp.com/terraform/$(terraformVersion)/terraform_$(terraformVersion)_linux_amd64.zip -o terraform.zip
-        unzip -o terraform.zip
-        sudo mv terraform /usr/local/bin/
-        terraform version
+    - task: Bash@3
       displayName: 'Install Terraform'
+      inputs:
+        targetType: 'inline'
+        script: |
+          sudo apt-get update -y
+          sudo apt-get install -y unzip curl
+          curl -fsSL https://releases.hashicorp.com/terraform/$(terraformVersion)/terraform_$(terraformVersion)_linux_amd64.zip -o terraform.zip
+          unzip -o terraform.zip
+          sudo mv terraform /usr/local/bin/
+          terraform version
 
-    - script: |
-        cd $(tfWorkingDirectory)
-        terraform apply -auto-approve "$(planFile)"
+    - task: Bash@3
       displayName: 'Terraform apply'
+      inputs:
+        targetType: 'inline'
+        script: |
+          cd $(tfWorkingDirectory)
+          terraform apply -auto-approve "$(planFile)"
 
 - stage: TerraformDestroy
   displayName: 'Terraform Destroy'
@@ -86,16 +104,22 @@ stages:
     steps:
     - checkout: self
 
-    - script: |
-        sudo apt-get update -y
-        sudo apt-get install -y unzip curl
-        curl -fsSL https://releases.hashicorp.com/terraform/$(terraformVersion)/terraform_$(terraformVersion)_linux_amd64.zip -o terraform.zip
-        unzip -o terraform.zip
-        sudo mv terraform /usr/local/bin/
-        terraform version
+    - task: Bash@3
       displayName: 'Install Terraform'
+      inputs:
+        targetType: 'inline'
+        script: |
+          sudo apt-get update -y
+          sudo apt-get install -y unzip curl
+          curl -fsSL https://releases.hashicorp.com/terraform/$(terraformVersion)/terraform_$(terraformVersion)_linux_amd64.zip -o terraform.zip
+          unzip -o terraform.zip
+          sudo mv terraform /usr/local/bin/
+          terraform version
 
-    - script: |
-        cd $(tfWorkingDirectory)
-        terraform destroy -auto-approve
+    - task: Bash@3
       displayName: 'Terraform destroy'
+      inputs:
+        targetType: 'inline'
+        script: |
+          cd $(tfWorkingDirectory)
+          terraform destroy -auto-approve
