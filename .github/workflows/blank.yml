@@ -4,17 +4,17 @@ name: Terraform CI/CD
 # HOW TO USE
 # ─────────────────────────────────────────────────────────────────────────────
 #
-#  Step 1 — Add these secrets in GitHub → Settings → Secrets → Actions:
-#           AZURE_CLIENT_ID
-#           AZURE_CLIENT_SECRET
-#           AZURE_TENANT_ID
-#           AZURE_SUBSCRIPTION_ID
-#           AZURE_VM_PASSWORD   ← VM admin password (min 12 chars,
-#                                  upper+lower+number+special required by Azure)
+#  Secrets required in GitHub → Settings → Secrets → Actions:
+#    AZURE_CLIENT_ID
+#    AZURE_CLIENT_SECRET
+#    AZURE_TENANT_ID
+#    AZURE_SUBSCRIPTION_ID
+#    AZURE_VM_PASSWORD   ← VM admin password (min 12 chars,
+#                           upper+lower+number+special required by Azure)
 #
-#  Step 2 — Go to Actions → Terraform CI/CD → Run workflow
-#           tf_file : type the filename e.g. vm.tf or network.tf
-#           action  : pick plan / apply / destroy
+#  Run workflow:
+#    tf_file : filename only, e.g. vm.tf or network.tf
+#    action  : plan / apply / destroy
 #
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -48,7 +48,7 @@ concurrency:
 jobs:
 
   # ───────────────────────────────────────────────────────────────────────────
-  # JOB 1 — List available .tf files (shown in the run summary for reference)
+  # JOB 1 — List available .tf files (shown in summary for reference)
   # ───────────────────────────────────────────────────────────────────────────
   list-tf-files:
     name: Available Terraform files
@@ -92,21 +92,18 @@ jobs:
     environment: ${{ github.event.inputs.action }}
 
     env:
-      ARM_CLIENT_ID:       ${{ secrets.AZURE_CLIENT_ID }}
-      ARM_CLIENT_SECRET:   ${{ secrets.AZURE_CLIENT_SECRET }}
-      ARM_TENANT_ID:       ${{ secrets.AZURE_TENANT_ID }}
-      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      # ── Terraform variable injection ─────────────────────────────────────
-      # Any TF_VAR_* env var is automatically picked up by Terraform as the
-      # matching input variable — no interactive prompt, no tfvars file needed.
-      # TF_VAR_admin_password → var.admin_password in your .tf file.
-      # Add AZURE_VM_PASSWORD in GitHub → Settings → Secrets → Actions.
+      ARM_CLIENT_ID:         ${{ secrets.AZURE_CLIENT_ID }}
+      ARM_CLIENT_SECRET:     ${{ secrets.AZURE_CLIENT_SECRET }}
+      ARM_TENANT_ID:         ${{ secrets.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID:   ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       TF_VAR_admin_password: ${{ secrets.AZURE_VM_PASSWORD }}
-
-      TF_FILE: ${{ github.event.inputs.tf_file }}
-      ACTION:  ${{ github.event.inputs.action }}
-      WS_DIR:  /home/runner/isolated-tf
+      TF_FILE:               ${{ github.event.inputs.tf_file }}
+      ACTION:                ${{ github.event.inputs.action }}
+      WS_DIR:                /home/runner/isolated-tf
+      # Backend config — kept here so the unlock step can reference them too
+      BACKEND_RG:            tfstate-day04
+      BACKEND_SA:            day0417691
+      BACKEND_CONTAINER:     tfstate
 
     steps:
 
@@ -117,28 +114,23 @@ jobs:
           fetch-depth: 0
 
       # ── Validate secrets ─────────────────────────────────────────────────
-      # Check AZURE_VM_PASSWORD specifically so we get a clear error message
-      # instead of Terraform hanging on an interactive prompt
-      - name: Validate Azure secrets
+      - name: Validate secrets
         shell: bash
         run: |
           missing=()
-          [[ -z "$ARM_CLIENT_ID"            ]] && missing+=("AZURE_CLIENT_ID")
-          [[ -z "$ARM_CLIENT_SECRET"        ]] && missing+=("AZURE_CLIENT_SECRET")
-          [[ -z "$ARM_TENANT_ID"            ]] && missing+=("AZURE_TENANT_ID")
-          [[ -z "$ARM_SUBSCRIPTION_ID"      ]] && missing+=("AZURE_SUBSCRIPTION_ID")
-          [[ -z "$TF_VAR_admin_password"    ]] && missing+=("AZURE_VM_PASSWORD")
+          [[ -z "$ARM_CLIENT_ID"          ]] && missing+=("AZURE_CLIENT_ID")
+          [[ -z "$ARM_CLIENT_SECRET"      ]] && missing+=("AZURE_CLIENT_SECRET")
+          [[ -z "$ARM_TENANT_ID"          ]] && missing+=("AZURE_TENANT_ID")
+          [[ -z "$ARM_SUBSCRIPTION_ID"    ]] && missing+=("AZURE_SUBSCRIPTION_ID")
+          [[ -z "$TF_VAR_admin_password"  ]] && missing+=("AZURE_VM_PASSWORD")
 
           if [[ ${#missing[@]} -gt 0 ]]; then
-            echo "ERROR: The following secrets are missing from GitHub Actions:"
-            for s in "${missing[@]}"; do
-              echo "  - $s"
-            done
+            echo "ERROR: Missing secrets:"
+            for s in "${missing[@]}"; do echo "  - $s"; done
             echo ""
-            echo "Go to: GitHub repo → Settings → Secrets and variables → Actions → New repository secret"
+            echo "Add them at: GitHub repo → Settings → Secrets and variables → Actions"
             exit 1
           fi
-
           echo "OK: All secrets present."
 
       # ── Validate selected file ───────────────────────────────────────────
@@ -199,7 +191,6 @@ jobs:
           echo "Copying selected file: Terraform/$TF_FILE"
           cp "Terraform/$TF_FILE" "$WS_DIR/"
 
-          # Copy shared configs that every .tf file depends on
           for shared in provider.tf versions.tf variables.tf; do
             if [[ -f "Terraform/$shared" ]] && [[ "$shared" != "$TF_FILE" ]]; then
               echo "Copying shared config: $shared"
@@ -207,7 +198,6 @@ jobs:
             fi
           done
 
-          # Copy .tfvars if present
           for tfvars in Terraform/*.tfvars Terraform/*.tfvars.json; do
             if [[ -f "$tfvars" ]]; then
               echo "Copying tfvars: $(basename $tfvars)"
@@ -244,30 +234,25 @@ jobs:
       # ── Bootstrap backend ─────────────────────────────────────────────────
       - name: Bootstrap Terraform backend
         shell: bash
-        env:
-          RESOURCE_GROUP:  tfstate-day04
-          STORAGE_ACCOUNT: day0417691
-          CONTAINER:       tfstate
-          LOCATION:        westeurope
         run: |
-          az group create --name "$RESOURCE_GROUP" --location "$LOCATION"
+          az group create --name "$BACKEND_RG" --location westeurope
 
           az storage account create \
-            --resource-group "$RESOURCE_GROUP" \
-            --name "$STORAGE_ACCOUNT" \
+            --resource-group "$BACKEND_RG" \
+            --name "$BACKEND_SA" \
             --sku Standard_LRS \
             --kind StorageV2 \
-            --location "$LOCATION"
+            --location westeurope
 
           ACCOUNT_KEY=$(az storage account keys list \
-            --resource-group "$RESOURCE_GROUP" \
-            --account-name "$STORAGE_ACCOUNT" \
+            --resource-group "$BACKEND_RG" \
+            --account-name "$BACKEND_SA" \
             --query '[0].value' \
             --output tsv)
 
           az storage container create \
-            --name "$CONTAINER" \
-            --account-name "$STORAGE_ACCOUNT" \
+            --name "$BACKEND_CONTAINER" \
+            --account-name "$BACKEND_SA" \
             --account-key "$ACCOUNT_KEY"
 
       # ── Terraform init ────────────────────────────────────────────────────
@@ -279,10 +264,59 @@ jobs:
           echo "Using state key: $STATE_KEY"
 
           terraform init -reconfigure \
-            -backend-config="resource_group_name=tfstate-day04" \
-            -backend-config="storage_account_name=day0417691" \
-            -backend-config="container_name=tfstate" \
+            -backend-config="resource_group_name=$BACKEND_RG" \
+            -backend-config="storage_account_name=$BACKEND_SA" \
+            -backend-config="container_name=$BACKEND_CONTAINER" \
             -backend-config="key=$STATE_KEY"
+
+      # ── Force-unlock stale state lock ────────────────────────────────────
+      # A previous run that crashed or was cancelled may have left the state
+      # blob locked. We detect this by checking the blob's lease status via
+      # Azure CLI and break the lease before Terraform tries to acquire it.
+      #
+      # This is safe here because:
+      #   - The concurrency group (terraform-<file>) ensures only ONE workflow
+      #     run for this file can execute at a time, so we will never break a
+      #     lock held by a legitimately running parallel job.
+      #   - We check the lease status first and only break it if it is locked.
+      - name: Force-unlock stale state lock
+        shell: bash
+        run: |
+          STATE_KEY="${TF_FILE%.tf}.tfstate"
+
+          ACCOUNT_KEY=$(az storage account keys list \
+            --resource-group "$BACKEND_RG" \
+            --account-name "$BACKEND_SA" \
+            --query '[0].value' \
+            --output tsv)
+
+          echo "Checking lease status of blob: $STATE_KEY"
+
+          LEASE_STATUS=$(az storage blob show \
+            --container-name "$BACKEND_CONTAINER" \
+            --name "$STATE_KEY" \
+            --account-name "$BACKEND_SA" \
+            --account-key "$ACCOUNT_KEY" \
+            --query "properties.lease.status" \
+            --output tsv 2>/dev/null || echo "notfound")
+
+          echo "Lease status: $LEASE_STATUS"
+
+          if [[ "$LEASE_STATUS" == "locked" ]]; then
+            echo "Stale lock detected — breaking blob lease..."
+
+            az storage blob lease break \
+              --container-name "$BACKEND_CONTAINER" \
+              --blob-name "$STATE_KEY" \
+              --account-name "$BACKEND_SA" \
+              --account-key "$ACCOUNT_KEY"
+
+            echo "OK: Lease broken. Terraform can now acquire the lock."
+          elif [[ "$LEASE_STATUS" == "notfound" ]]; then
+            echo "OK: State blob does not exist yet (first run). No lock to clear."
+          else
+            echo "OK: Blob is unlocked (status: $LEASE_STATUS). Nothing to do."
+          fi
 
       # ── Terraform format (auto-fix + commit) ──────────────────────────────
       - name: Terraform format (auto-fix)
