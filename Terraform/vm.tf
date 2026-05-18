@@ -28,9 +28,13 @@ variable "resource_group_name" {
 }
 
 variable "location" {
-  description = "Azure region to deploy into"
-  type        = string
-  default     = "westeurope"
+  description = <<EOT
+Azure region to deploy into.
+Standard_B1s is frequently sold out in westeurope — try one of:
+  northeurope / eastus / eastus2 / uksouth / centralus
+EOT
+  type    = string
+  default = "northeurope" # changed from westeurope — better B-series availability
 }
 
 variable "vm_name" {
@@ -40,9 +44,17 @@ variable "vm_name" {
 }
 
 variable "vm_size" {
-  description = "Azure VM SKU size"
-  type        = string
-  default     = "Standard_B1s" # 1 vCPU, 1 GB RAM — cheapest general-purpose
+  description = <<EOT
+Azure VM SKU size. B-series availability varies by region and time.
+Recommended options in order of cost (cheapest first):
+  Standard_B1s   — 1 vCPU,  1 GB  (may be unavailable)
+  Standard_B1ms  — 1 vCPU,  2 GB
+  Standard_B2s   — 2 vCPU,  4 GB
+  Standard_B2ms  — 2 vCPU,  8 GB
+  Standard_D2s_v3 — 2 vCPU, 8 GB  (always available, slightly more expensive)
+EOT
+  type    = string
+  default = "Standard_B2s" # more widely available than B1s
 }
 
 variable "admin_username" {
@@ -90,7 +102,6 @@ resource "azurerm_subnet" "main" {
   address_prefixes     = ["10.0.1.0/24"]
 }
 
-# Public IP so you can SSH into the VM
 resource "azurerm_public_ip" "main" {
   name                = "pip-${var.vm_name}"
   resource_group_name = azurerm_resource_group.main.name
@@ -99,7 +110,6 @@ resource "azurerm_public_ip" "main" {
   sku                 = "Standard"
 }
 
-# Network Security Group — allows SSH inbound only
 resource "azurerm_network_security_group" "main" {
   name                = "nsg-${var.vm_name}"
   resource_group_name = azurerm_resource_group.main.name
@@ -131,7 +141,6 @@ resource "azurerm_network_interface" "main" {
   }
 }
 
-# Associate NSG with the NIC
 resource "azurerm_network_interface_security_group_association" "main" {
   network_interface_id      = azurerm_network_interface.main.id
   network_security_group_id = azurerm_network_security_group.main.id
