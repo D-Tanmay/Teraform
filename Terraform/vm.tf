@@ -16,9 +16,8 @@ terraform {
 provider "azurerm" {
   features {}
 
-  # Free tier subscriptions sometimes need this to skip provider registration
-  # errors on first run
-  skip_provider_registration = false
+  # Replaces deprecated skip_provider_registration (removed in azurerm v5)
+  resource_provider_registrations = "none"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -32,13 +31,9 @@ variable "resource_group_name" {
 }
 
 variable "location" {
-  description = <<EOT
-Azure region. Free tier works best in eastus or eastus2.
-DO NOT use westeurope or northeurope — B1s capacity is
-almost always exhausted there for free tier subscriptions.
-EOT
-  type    = string
-  default = "eastus"
+  description = "Azure region. eastus has best free-tier B1s availability."
+  type        = string
+  default     = "eastus"
 }
 
 variable "vm_name" {
@@ -48,14 +43,9 @@ variable "vm_name" {
 }
 
 variable "vm_size" {
-  description = <<EOT
-Azure free tier eligible VM size.
-Standard_B1s is the free tier VM (750 hrs/month free).
-If B1s is unavailable in your region, try Standard_B1ms.
-DO NOT use B2s or larger — not covered by free tier.
-EOT
-  type    = string
-  default = "Standard_B1s"
+  description = "Free tier: Standard_B1s (750 hrs/month free). Do not upsize."
+  type        = string
+  default     = "Standard_B1s"
 }
 
 variable "admin_username" {
@@ -65,19 +55,15 @@ variable "admin_username" {
 }
 
 variable "admin_password" {
-  description = "Admin password for the VM (min 12 chars, upper+lower+number+special)"
+  description = "Admin password (min 12 chars, upper+lower+number+special)"
   type        = string
   sensitive   = true
 }
 
 variable "os_disk_size_gb" {
-  description = <<EOT
-OS disk size in GB.
-Free tier includes 2 x 64 GB managed disks.
-Keep at 30 GB to stay within free tier limits.
-EOT
-  type    = number
-  default = 30
+  description = "OS disk size in GB. Free tier includes 64 GB — keep at 30."
+  type        = number
+  default     = 30
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -87,6 +73,11 @@ EOT
 resource "azurerm_resource_group" "main" {
   name     = var.resource_group_name
   location = var.location
+
+  timeouts {
+    create = "10m"
+    delete = "10m"
+  }
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -100,6 +91,11 @@ resource "azurerm_virtual_network" "main" {
   address_space       = ["10.0.0.0/16"]
 
   depends_on = [azurerm_resource_group.main]
+
+  timeouts {
+    create = "10m"
+    delete = "10m"
+  }
 }
 
 resource "azurerm_subnet" "main" {
@@ -109,6 +105,11 @@ resource "azurerm_subnet" "main" {
   address_prefixes     = ["10.0.1.0/24"]
 
   depends_on = [azurerm_virtual_network.main]
+
+  timeouts {
+    create = "10m"
+    delete = "10m"
+  }
 }
 
 resource "azurerm_public_ip" "main" {
@@ -119,6 +120,11 @@ resource "azurerm_public_ip" "main" {
   sku                 = "Standard"
 
   depends_on = [azurerm_resource_group.main]
+
+  timeouts {
+    create = "10m"
+    delete = "10m"
+  }
 }
 
 resource "azurerm_network_security_group" "main" {
@@ -139,6 +145,11 @@ resource "azurerm_network_security_group" "main" {
   }
 
   depends_on = [azurerm_resource_group.main]
+
+  timeouts {
+    create = "10m"
+    delete = "10m"
+  }
 }
 
 resource "azurerm_network_interface" "main" {
@@ -157,6 +168,11 @@ resource "azurerm_network_interface" "main" {
     azurerm_subnet.main,
     azurerm_public_ip.main,
   ]
+
+  timeouts {
+    create = "10m"
+    delete = "10m"
+  }
 }
 
 resource "azurerm_network_interface_security_group_association" "main" {
@@ -170,20 +186,7 @@ resource "azurerm_network_interface_security_group_association" "main" {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Virtual Machine
-#
-# FREE TIER LIMITS (per month):
-#   ✅ 750 hrs  Standard_B1s Linux VM
-#   ✅ 64 GB    managed disk (we use 30 GB)
-#   ✅ 5 GB     outbound data transfer
-#   ✅ 1        public IP (Standard SKU not free — see note below)
-#
-# ⚠️  NOTE ON PUBLIC IP COST:
-#   Standard SKU public IPs are NOT free (~$0.005/hr).
-#   To stay 100% free, delete the VM when not in use (destroy action),
-#   or change allocation_method to "Dynamic" and sku to "Basic" above —
-#   but Basic SKU is being retired by Azure in Sept 2025.
-#   Standard is kept here for compatibility.
+# Virtual Machine (Linux — Ubuntu 22.04 LTS)
 # ─────────────────────────────────────────────────────────────────────────────
 
 resource "azurerm_linux_virtual_machine" "main" {
@@ -203,7 +206,7 @@ resource "azurerm_linux_virtual_machine" "main" {
   os_disk {
     name                 = "osdisk-${var.vm_name}"
     caching              = "ReadWrite"
-    storage_account_type = "Standard_LRS" # cheapest — included in free tier
+    storage_account_type = "Standard_LRS"
     disk_size_gb         = var.os_disk_size_gb
   }
 
@@ -222,6 +225,11 @@ resource "azurerm_linux_virtual_machine" "main" {
   depends_on = [
     azurerm_network_interface_security_group_association.main,
   ]
+
+  timeouts {
+    create = "20m"
+    delete = "20m"
+  }
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -246,9 +254,4 @@ output "ssh_command" {
 output "resource_group" {
   description = "Resource group containing all VM resources"
   value       = azurerm_resource_group.main.name
-}
-
-output "free_tier_reminder" {
-  description = "Reminder to destroy when not in use"
-  value       = "REMINDER: Run 'destroy' when done to avoid charges. Free tier = 750 hrs/month B1s."
 }
